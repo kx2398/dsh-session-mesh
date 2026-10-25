@@ -1,0 +1,8 @@
+# Keep LF in the repo regardless of the checkout platform (the plugin is plain ESM).
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.ico binary
+*.tgz binary

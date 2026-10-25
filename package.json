@@ -1,0 +1,51 @@
+{
+  "name": "dsh-session-mesh",
+  "version": "0.2.1",
+  "private": true,
+  "description": "Cross-session mesh: list every session in every workspace, message any session as a real agent message, create/rename/archive/cancel sessions, and wait for session changes.",
+  "type": "module",
+  "license": "MIT",
+  "author": "kx2398",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kx2398/dsh-session-mesh.git"
+  },
+  "homepage": "https://github.com/kx2398/dsh-session-mesh#readme",
+  "bugs": {
+    "url": "https://github.com/kx2398/dsh-session-mesh/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "multi-agent",
+    "session"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.3 <0.3.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/mock-apply.mjs",
+    "pack:dist": "npm pack --pack-destination dist"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "icon": "./icon.svg"
+}

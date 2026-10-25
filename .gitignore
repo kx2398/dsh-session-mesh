@@ -1,0 +1,19 @@
+# dependencies (this plugin has none, but keep the rule for future)
+node_modules/
+
+# packaged artifacts: ship them as GitHub Release assets, never in git
+dist/
+*.tgz
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# local logs
+*.log

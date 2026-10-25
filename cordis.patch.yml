@@ -1,0 +1,19 @@
+# Session Mesh bundle layer.
+# Insert one host plugin that registers cross-session tools. No agent scope is
+# replaced: the tools are global and every root session becomes a mesh peer.
+- insert:
+    - id: session-mesh
+      name: 'dsh-session-mesh'
+      config:
+        defaultMode: queue          # queue | steer
+        maxMessageBytes: 65536
+        allowCreate: true
+        allowArchive: true
+        allowCancel: true
+        allowSteer: false           # peer steer can interrupt a human turn
+        maxSendsPerMinute: 30
+        allowArchivedSend: false
+        identityContext: true
+        policy: short               # full | short | off
+        allowedPeers: []            # empty = everyone; otherwise exact session ids
+        blockedPeers: []
