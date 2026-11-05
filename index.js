@@ -452,6 +452,32 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  /**
+   * Read one session's complete event log without waking it.
+   * DSH 0.2.2 removed `sessionController.inspect`; `sessionQuery.readSession`
+   * is the cross-version cold-safe reader, so it is preferred and the old
+   * inspect path is kept only as a fallback for 0.2.1 deployments.
+   */
+  async function readSessionEvents(exec, sessionId) {
+    if (typeof ctx.sessionQuery.readSession === 'function') {
+      try {
+        const snapshot = await ctx.sessionQuery.readSession(sessionId)
+        return Array.isArray(snapshot?.events) ? snapshot.events : []
+      } catch (error) {
+        throw new Error(`cannot read session "${sessionId}": ${describeAgentError(error)}`)
+      }
+    }
+    if (typeof ctx.sessionController.inspect === 'function') {
+      try {
+        const inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
+        return Array.isArray(inspection?.events) ? inspection.events : []
+      } catch (error) {
+        throw new Error(`cannot inspect session "${sessionId}": ${describeAgentError(error)}`)
+      }
+    }
+    throw new Error(`cannot read session "${sessionId}": this DSH build exposes neither sessionQuery.readSession nor sessionController.inspect`)
+  }
+
   /** Read one session goal without waking the session. */
   async function readGoalState(exec, sessionId) {
     const goals = optionalService('goals')
@@ -463,13 +489,8 @@ export function apply(ctx, config = {}) {
         /* fall back to the durable log when the live projection is unavailable */
       }
     }
-    let inspection
-    try {
-      inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
-    } catch (error) {
-      throw new Error(`cannot inspect session "${sessionId}": ${describeAgentError(error)}`)
-    }
-    return { goal: foldPersistedGoal(inspection?.events), live: false }
+    const events = await readSessionEvents(exec, sessionId)
+    return { goal: foldPersistedGoal(events), live: false }
   }
 
   /** Resolve the exact live agent that owns a target session (may resume it). */
@@ -589,13 +610,8 @@ export function apply(ctx, config = {}) {
 
   /** Read the recent transcript of one session without waking it. */
   async function readTranscript(exec, sessionId, limit, includeTools) {
-    let inspection
-    try {
-      inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
-    } catch (error) {
-      throw new Error(`cannot inspect session "${sessionId}": ${describeAgentError(error)}`)
-    }
-    const all = transcriptEntries(inspection?.events)
+    const events = await readSessionEvents(exec, sessionId)
+    const all = transcriptEntries(events)
     const filtered = includeTools ? all : all.filter((entry) => entry.role !== 'tool')
     const page = filtered.slice(-limit)
     return { total: filtered.length, entries: page }

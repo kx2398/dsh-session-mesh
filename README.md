@@ -9,6 +9,7 @@
 - 零运行时依赖、无构建步骤、纯 ESM
 - 14 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
 - 分发方式：GitHub tag / Release tarball（**不发布到 npm**）
+- 兼容性：已在 DSH **0.2.1-rc.3** 与 **0.2.2-rc.1** 上验证；0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`
 
 ---
 
@@ -16,10 +17,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.0
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.1
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.0.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.1.tgz
 ```
 
 ## 2. 它做什么
@@ -65,13 +66,13 @@ mesh_* 工具
   ├─ 归档     workspaceRegistry.archiveSession(id, {stopActivity}) / unarchiveSession(id)
   ├─ 取消     sessionController.cancel({sessionId})
   ├─ 等待     ctx.on('api-session/status|activity|added|removed') 一次性 waiter
-  ├─ 目标     读：live agent 的 ctx.goals.get() → 否则 sessionController.inspect() 折叠 goal/change
+  ├─ 目标     读：live agent 的 ctx.goals.get() → 否则 sessionQuery.readSession() 折叠 goal/change
   │           写：sessionController.resolveAgent(target) → ctx.goals.create/edit/pause/resume/complete/clear
   │               （ref = {id, revision}，compare-and-set；ctx.goals 用 ctx.get('goals') 可选获取）
-  └─ 转录     sessionController.inspect(target) → 事件过滤/配对（user·peer·assistant·tool call+result）
+  └─ 转录     sessionQuery.readSession(target) → 事件过滤/配对（user·peer·assistant·tool call+result）
 ```
 
-- **转录**：`mesh_read_session` 用 `inspect()` 读日志（不唤醒），配对 `tool/call` 与 `tool/result`（按 `turn:callId`），过滤 runtime-context/system-prompt 等内部注入，文本按 600/300/400 字符预览，取最近 N 条。
+- **转录**：`mesh_read_session` 用 `sessionQuery.readSession()` 读日志（不唤醒；0.2.1 回退 `inspect()`），配对 `tool/call` 与 `tool/result`（按 `turn:callId`），过滤 runtime-context/system-prompt 等内部注入，文本按 600/300/400 字符预览，取最近 N 条。
 
 - **性能**：列表先做不需要标题的过滤 → 排序 → 分页 → 只给当页读标题；带 `query` 时才读候选集标题。工作区映射一次 O(工作区×会话) 建索引，不再每行遍历。
 - **安全**：默认 `allowSteer: false`、`maxSendsPerMinute: 30`、同目标同内容 60s 内重复抑制；可选 `allowedPeers`/`blockedPeers`（精确 sessionId）白/黑名单；发送写 `ctx.logger.info` 审计。
@@ -110,10 +111,10 @@ mesh_* 工具
 ```powershell
 git clone https://github.com/kx2398/dsh-session-mesh.git
 cd dsh-session-mesh
-npm test        # node test/mock-apply.mjs，31 项
+npm test        # node test/mock-apply.mjs，32 项
 ```
 
-覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、`policy: off`。
+覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、`policy: off`。
 
 ### 在线验证
 

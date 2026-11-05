@@ -5,7 +5,7 @@
 ## 1. 发布前检查
 
 ```powershell
-npm test                     # 31 项离线 mock-host 自检
+npm test                     # 32 项离线 mock-host 自检
 node --check index.js        # 语法检查
 npm pack --dry-run           # 确认只打包运行必需文件（约 20 KB / 8 个文件）
 ```

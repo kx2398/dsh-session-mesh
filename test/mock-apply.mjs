@@ -261,6 +261,13 @@ function createHarness(overrides = {}) {
       async readTitleSnapshots(ids) {
         return ids.map((id) => ({ status: 'fulfilled', value: { title: { title: `title-${id}` } } }))
       },
+      async readSession(sessionId) {
+        const merged = [
+          ...(goalEvents.get(sessionId) ?? []),
+          ...(transcriptEvents.get(sessionId) ?? []),
+        ].sort((left, right) => left.seq - right.seq)
+        return { session: { id: sessionId }, inheritedEventCount: 0, events: structuredClone(merged) }
+      },
     },
     sessionTitle: {
       get(session) {
@@ -629,6 +636,19 @@ async function main() {
     const noTools = JSON.parse(await readSessionTool.execute({ target: 'session-b', limit: 2, include_tools: false }, exec()))
     assert.deepEqual(noTools.entries.map((entry) => entry.role), ['assistant', 'user'])
     assert.ok(noTools.entries.every((entry) => entry.role !== 'tool'))
+  })
+
+  await check('readSessionEvents falls back to inspect when readSession is absent', async () => {
+    const legacy = createHarness()
+    legacy.appendTranscriptEvent('session-b', {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'legacy fallback works' }], source: { kind: 'user' } },
+    })
+    delete legacy.ctx.sessionQuery.readSession
+    apply(legacy.ctx, {})
+    const page = JSON.parse(await legacy.tools.get('mesh_read_session').execute({ target: 'session-b', limit: 1 }, execFor(legacy)))
+    assert.equal(page.entries.length, 1)
+    assert.equal(page.entries[0].text, 'legacy fallback works')
   })
 
   await check('policy off disables the section', () => {
