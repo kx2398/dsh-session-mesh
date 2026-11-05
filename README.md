@@ -2,12 +2,12 @@
 
 > 让 DeepSeek Harness（dsh）里**所有工作区**的普通会话互相发现、互相发消息、互相建会话/改标题/归档的 Host 插件。无任务板、无新增会话事件、不依赖 `experimental-agent-team` 或 subagent。
 >
-> **English**: a DeepSeek Harness (dsh) host plugin that turns every root session in every workspace into a peer: list sessions, message any session as a real `agent-message`, create/rename/archive/cancel sessions, and wait for session changes. No task board, no new session event types.
+> **English**: a DeepSeek Harness (dsh) host plugin that turns every root session in every workspace into a peer: list sessions, message any session as a real `agent-message`, create/rename/archive/cancel sessions, and wait for session changes. It also manages other sessions’ long-term goals and reads their recent transcripts. No task board, no new session event types.
 
 - License: MIT
 - 要求：DSH `>=0.2.1-rc.3 <0.3.0`（`engines.dsh`）；desktop / web-app 这类包含标准 Host 服务的 profile
 - 零运行时依赖、无构建步骤、纯 ESM
-- 11 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
+- 14 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
 - 分发方式：GitHub tag / Release tarball（**不发布到 npm**）
 
 ---
@@ -16,10 +16,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.3.0
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.0
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.3.0.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.0.tgz
 ```
 
 ## 2. 它做什么
@@ -37,8 +37,11 @@ plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.3.0.tgz
 | `mesh_set_goal` | 增/改任意会话的长期目标：无目标或已 `complete` 时创建（需 objective），否则原地改 objective / round 上限；写入可能唤醒冷会话 |
 | `mesh_update_goal` | 改 phase：`pause` / `resume` / `complete`；resume 在 round 预算仍有剩余时可用 |
 | `mesh_clear_goal` | 删当前目标（历史保留在目标会话日志里） |
+| `mesh_start_goal` | **启**：无目标/已完成则创建（需 objective），paused/blocked 则 resume，已 active 且 armed 时幂等返回 |
+| `mesh_stop_goal` | **停**：把目标 pause（停止自动续行、保留 phase/revision）；已 paused/blocked/complete 时幂等返回 |
+| `mesh_read_session` | **看**：读任意会话最近 N 条对话记录（人 / peer / assistant / 工具调用与结果），默认 20 条、最多 50；按时间正序、文本截断；读日志不唤醒目标 |
 
-所有目标写操作都要求先 `mesh_get_goal` 并把观测到的 `expected_revision` 传进来：过期 revision 会被拒绝，不会静默覆盖。目标状态存在**目标会话自己的日志**（`goal/change` 事件），随会话恢复/fork 持久化。
+所有目标写操作都要求先 `mesh_get_goal` 并把观测到的 `expected_revision` 传进来：过期 revision 会被拒绝，不会静默覆盖。目标状态存在**目标会话自己的日志**（`goal/change` 事件），随会话恢复/fork 持久化。`mesh_read_session` 会过滤掉 runtime-context / system-prompt 等内部注入消息，只保留人、peer、assistant 与工具记录。
 
 模型可见文本两段：
 
@@ -62,10 +65,13 @@ mesh_* 工具
   ├─ 归档     workspaceRegistry.archiveSession(id, {stopActivity}) / unarchiveSession(id)
   ├─ 取消     sessionController.cancel({sessionId})
   ├─ 等待     ctx.on('api-session/status|activity|added|removed') 一次性 waiter
-  └─ 目标     读：live agent 的 ctx.goals.get() → 否则 sessionController.inspect() 折叠 goal/change
-              写：sessionController.resolveAgent(target) → ctx.goals.create/edit/pause/resume/complete/clear
-                  （ref = {id, revision}，compare-and-set；ctx.goals 用 ctx.get('goals') 可选获取）
+  ├─ 目标     读：live agent 的 ctx.goals.get() → 否则 sessionController.inspect() 折叠 goal/change
+  │           写：sessionController.resolveAgent(target) → ctx.goals.create/edit/pause/resume/complete/clear
+  │               （ref = {id, revision}，compare-and-set；ctx.goals 用 ctx.get('goals') 可选获取）
+  └─ 转录     sessionController.inspect(target) → 事件过滤/配对（user·peer·assistant·tool call+result）
 ```
+
+- **转录**：`mesh_read_session` 用 `inspect()` 读日志（不唤醒），配对 `tool/call` 与 `tool/result`（按 `turn:callId`），过滤 runtime-context/system-prompt 等内部注入，文本按 600/300/400 字符预览，取最近 N 条。
 
 - **性能**：列表先做不需要标题的过滤 → 排序 → 分页 → 只给当页读标题；带 `query` 时才读候选集标题。工作区映射一次 O(工作区×会话) 建索引，不再每行遍历。
 - **安全**：默认 `allowSteer: false`、`maxSendsPerMinute: 30`、同目标同内容 60s 内重复抑制；可选 `allowedPeers`/`blockedPeers`（精确 sessionId）白/黑名单；发送写 `ctx.logger.info` 审计。
@@ -81,7 +87,7 @@ mesh_* 工具
 | `allowCreate` | `true` | 允许创建会话 |
 | `allowArchive` | `true` | 允许归档/取消归档 |
 | `allowCancel` | `true` | 允许停止他人回合 |
-| `allowGoal` | `true` | 允许增删改他人长期目标（读目标不受限） |
+| `allowGoal` | `true` | 允许增删改 / 启停他人长期目标（读目标不受限） |
 | `allowSteer` | `false` | 允许 `steer` 投递（可能打断人类正在跑的回合） |
 | `maxSendsPerMinute` | `30` | 每个发送方每分钟发送上限 |
 | `allowArchivedSend` | `false` | 允许向已归档会话发消息 |
@@ -104,10 +110,10 @@ mesh_* 工具
 ```powershell
 git clone https://github.com/kx2398/dsh-session-mesh.git
 cd dsh-session-mesh
-npm test        # node test/mock-apply.mjs，29 项
+npm test        # node test/mock-apply.mjs，31 项
 ```
 
-覆盖：11 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、`policy: off`。
+覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、`policy: off`。
 
 ### 在线验证
 
@@ -115,6 +121,8 @@ npm test        # node test/mock-apply.mjs，29 项
 - `mesh_create_session` / `mesh_rename_session` / `mesh_archive_session` / 取消归档正常。
 - `mesh_send_message` 向空闲空白会话投递 → 目标被唤醒并跑完回合；目标会话日志中该消息的 `source` 为 `{"kind":"agent-message","form":"relay","senderSessionId":...}`。
 - 目标 CRUD：给测试会话 create → edit → pause → resume → complete → clear；目标会话日志中出现对应的 `goal/change` 事件，读冷会话不唤醒目标。
+- 目标启停：start（创建）→ stop（paused）→ start（resumed）→ 幂等 no-op → clear。
+- 转录：对冷会话 `mesh_read_session` 返回最近若干条 human/assistant/tool/peer 记录，过滤内部注入消息，且不唤醒目标。
 
 ## 7. 已知限制
 
@@ -124,8 +132,9 @@ npm test        # node test/mock-apply.mjs，29 项
 4. **归档会话不可唤醒**：宿主 `ArchivedSessionGate` 会拒绝其 pre-step；必须先 unarchive。
 5. **消息不进入发送方日志**：发送记录落在目标会话；发送方只能在回复到达时看到 `[mesh]` 消息。
 6. **没有强制文件隔离**：不同工作区的会话可能共享同一文件系统路径；写冲突仍需自行协调。
-7. **目标写入会唤醒目标会话**：`mesh_set_goal` / `mesh_update_goal` / `mesh_clear_goal` 需要目标的 live Agent，冷会话会先被恢复；只有 `mesh_get_goal` 保证不唤醒。目标服务（`dsh-goal`）未挂载时目标工具会明确报错。
+7. **目标写入会唤醒目标会话**：`mesh_set_goal` / `mesh_update_goal` / `mesh_clear_goal` / `mesh_start_goal` / `mesh_stop_goal` 需要目标的 live Agent，冷会话会先被恢复；只有 `mesh_get_goal` / `mesh_read_session` 保证不唤醒。目标服务（`dsh-goal`）未挂载时目标工具会明确报错。
 8. **一个会话只有一个目标**：与宿主语义一致；非 complete 目标需先 edit/pause/resume 或 clear 才能被替换。目标 phase 与 round 预算的自动续行仍由宿主的 goal round driver 负责，本插件只负责跨会话管理状态。
+9. **转录是预览不是完整历史**：`mesh_read_session` 每条文本会截断（600/300/400 字符），默认只取最近 20 条（最多 50）；它读完整日志后截取，超长会话的读取成本与磁盘日志大小成正比。
 
 ## 8. 与生态现有插件的关系
 

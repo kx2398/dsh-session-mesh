@@ -35,6 +35,8 @@ function createHarness(overrides = {}) {
   const resolveCalls = []
   const goalState = new Map()
   const goalEvents = new Map()
+  const transcriptEvents = new Map()
+  let eventSeq = 0
   let goalCounter = 0
   const liveAgents = new Map()
   const agent = {
@@ -54,6 +56,8 @@ function createHarness(overrides = {}) {
   function appendGoalEvent(sessionId, operation, goal) {
     const events = goalEvents.get(sessionId) ?? []
     events.push({
+      seq: ++eventSeq,
+      time: 1700000000000 + eventSeq,
       type: 'goal/change',
       data: operation === 'clear'
         ? { kind: 'goal/change', version: 1, operation, cleared: goal, clearedAt: Date.now() }
@@ -74,6 +78,12 @@ function createHarness(overrides = {}) {
           },
     })
     goalEvents.set(sessionId, events)
+  }
+
+  function appendTranscriptEvent(sessionId, event) {
+    const events = transcriptEvents.get(sessionId) ?? []
+    events.push({ seq: ++eventSeq, time: 1700000000000 + eventSeq, ...event })
+    transcriptEvents.set(sessionId, events)
   }
 
   function transitionGoal(targetAgent, ref, phase, operation) {
@@ -194,7 +204,11 @@ function createHarness(overrides = {}) {
         return { items: structuredClone(state.listItems) }
       },
       async inspect(sessionId) {
-        return { events: structuredClone(goalEvents.get(sessionId) ?? []) }
+        const merged = [
+          ...(goalEvents.get(sessionId) ?? []),
+          ...(transcriptEvents.get(sessionId) ?? []),
+        ].sort((left, right) => left.seq - right.seq)
+        return { events: structuredClone(merged) }
       },
       async resolveAgent(sessionId) {
         resolveCalls.push(sessionId)
@@ -267,6 +281,8 @@ function createHarness(overrides = {}) {
     resolveCalls,
     goalState,
     goalEvents,
+    transcriptEvents,
+    appendTranscriptEvent,
     goalService,
     liveAgents,
     state,
@@ -302,7 +318,7 @@ async function main() {
     failOnWarnings: false,
   })
 
-  await check('registers 11 tools', () => assert.equal(harness.tools.size, 11))
+  await check('registers 14 tools', () => assert.equal(harness.tools.size, 14))
   await check('registers policy section', () => assert.equal(harness.sections.length, 1))
   await check('registers identity context', () => assert.equal(harness.contexts.length, 1))
   await check('identity text renders', () => {
@@ -323,6 +339,9 @@ async function main() {
   const setGoalTool = harness.tools.get('mesh_set_goal')
   const updateGoalTool = harness.tools.get('mesh_update_goal')
   const clearGoalTool = harness.tools.get('mesh_clear_goal')
+  const startGoalTool = harness.tools.get('mesh_start_goal')
+  const stopGoalTool = harness.tools.get('mesh_stop_goal')
+  const readSessionTool = harness.tools.get('mesh_read_session')
 
   await check('list excludes archived and paginates', async () => {
     const page = JSON.parse(await listTool.execute({ limit: 1 }, exec()))
@@ -546,6 +565,70 @@ async function main() {
       noGoals.tools.get('mesh_set_goal').execute({ target: 'session-b', objective: 'x' }, execFor(noGoals)),
       /goal service is not available/,
     )
+  })
+
+  await check('start/stop drive a goal lifecycle', async () => {
+    const started = JSON.parse(await startGoalTool.execute({ target: 'session-c', objective: 'started goal' }, exec()))
+    assert.equal(started.action, 'created')
+    const stopped = JSON.parse(await stopGoalTool.execute({ target: 'session-c', expected_revision: started.goal.revision }, exec()))
+    assert.equal(stopped.action, 'paused')
+    assert.equal(stopped.goal.phase, 'paused')
+    const again = JSON.parse(await stopGoalTool.execute({ target: 'session-c', expected_revision: stopped.goal.revision }, exec()))
+    assert.equal(again.action, 'already-stopped')
+    const restarted = JSON.parse(await startGoalTool.execute({ target: 'session-c', expected_revision: again.goal.revision }, exec()))
+    assert.equal(restarted.action, 'resumed')
+    assert.equal(restarted.goal.phase, 'active')
+    const noop = JSON.parse(await startGoalTool.execute({ target: 'session-c', expected_revision: restarted.goal.revision }, exec()))
+    assert.equal(noop.action, 'already-active')
+    await clearGoalTool.execute({ target: 'session-c', expected_revision: noop.goal.revision }, exec())
+  })
+
+  await check('read transcript summarizes human/assistant/tool/peer entries', async () => {
+    harness.appendTranscriptEvent('session-b', {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'human asks about the build' }], source: { kind: 'user' } },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'runtime context noise' }], source: { kind: 'runtime-context' } },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'skill catalog noise' }], source: { kind: 'skill-catalog' } },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'time context noise' }], source: { kind: 'time-context' } },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'reasoning', text: 'thinking' }, { type: 'text', text: 'assistant reply' }] } },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'tool/call',
+      data: { turn: 1, step: 1, callId: 'call-1', name: 'grep', arguments: '{"pattern":"build"}' },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'tool/result',
+      data: { turn: 1, step: 1, toolCallId: 'call-1', message: { role: 'tool', content: [{ type: 'text', text: 'grep result text' }] } },
+    })
+    harness.appendTranscriptEvent('session-b', {
+      type: 'user/message',
+      data: { content: [{ type: 'text', text: 'peer asks for status' }], source: { kind: 'agent-message', senderSessionId: 'session-a' } },
+    })
+    const before = harness.resolveCalls.length
+    const page = JSON.parse(await readSessionTool.execute({ target: 'session-b', limit: 3 }, exec()))
+    assert.equal(page.total, 4)
+    assert.equal(page.returned, 3)
+    assert.deepEqual(page.entries.map((entry) => entry.role), ['assistant', 'tool', 'user'])
+    assert.equal(page.entries[0].text, 'assistant reply')
+    assert.equal(page.entries[1].name, 'grep')
+    assert.equal(page.entries[1].result, 'grep result text')
+    assert.equal(page.entries[2].source, 'peer')
+    assert.equal(harness.resolveCalls.length, before, 'transcript reads must not wake the target')
+    const noTools = JSON.parse(await readSessionTool.execute({ target: 'session-b', limit: 2, include_tools: false }, exec()))
+    assert.deepEqual(noTools.entries.map((entry) => entry.role), ['assistant', 'user'])
+    assert.ok(noTools.entries.every((entry) => entry.role !== 'tool'))
   })
 
   await check('policy off disables the section', () => {
