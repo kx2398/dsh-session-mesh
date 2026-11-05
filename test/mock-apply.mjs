@@ -32,6 +32,11 @@ function createHarness(overrides = {}) {
   const delivered = []
   const promptCalls = []
   const createRequests = []
+  const resolveCalls = []
+  const goalState = new Map()
+  const goalEvents = new Map()
+  let goalCounter = 0
+  const liveAgents = new Map()
   const agent = {
     id: 'session-a',
     session: { header: { cwd: WS_TEST.path } },
@@ -44,8 +49,110 @@ function createHarness(overrides = {}) {
       },
     },
   }
+  liveAgents.set('session-a', agent)
+
+  function appendGoalEvent(sessionId, operation, goal) {
+    const events = goalEvents.get(sessionId) ?? []
+    events.push({
+      type: 'goal/change',
+      data: operation === 'clear'
+        ? { kind: 'goal/change', version: 1, operation, cleared: goal, clearedAt: Date.now() }
+        : {
+            kind: 'goal/change',
+            version: 1,
+            operation,
+            goal: {
+              id: goal.id,
+              revision: goal.revision,
+              objective: goal.objective,
+              phase: goal.phase,
+              maxGoalRounds: goal.maxGoalRounds,
+            },
+            roundsStarted: goal.roundsStarted,
+            createdAt: goal.createdAt,
+            updatedAt: goal.updatedAt,
+          },
+    })
+    goalEvents.set(sessionId, events)
+  }
+
+  function transitionGoal(targetAgent, ref, phase, operation) {
+    const current = goalState.get(targetAgent.id)
+    if (current === undefined || current.id !== ref.id || current.revision !== ref.revision) {
+      throw Object.assign(new Error('stale goal revision'), { code: 'GOAL_STALE_REVISION' })
+    }
+    const next = { ...current, revision: current.revision + 1, phase, updatedAt: current.updatedAt + 1 }
+    goalState.set(targetAgent.id, next)
+    appendGoalEvent(targetAgent.id, operation, next)
+    return next
+  }
+
+  const goalService = {
+    get(targetAgent) {
+      return goalState.get(targetAgent.id)
+    },
+    create(targetAgent, request) {
+      const existing = goalState.get(targetAgent.id)
+      if (existing !== undefined && existing.phase !== 'complete') {
+        throw Object.assign(new Error('a non-complete goal already exists'), { code: 'GOAL_ALREADY_EXISTS' })
+      }
+      goalCounter += 1
+      const goal = {
+        id: `goal-${goalCounter}`,
+        revision: 1,
+        objective: request.objective,
+        phase: 'active',
+        maxGoalRounds: request.maxGoalRounds ?? 256,
+        roundsStarted: 0,
+        createdAt: 1000 + goalCounter,
+        updatedAt: 1000 + goalCounter,
+        activation: 'armed',
+      }
+      goalState.set(targetAgent.id, goal)
+      appendGoalEvent(targetAgent.id, 'create', goal)
+      return goal
+    },
+    edit(targetAgent, ref, request) {
+      const current = goalState.get(targetAgent.id)
+      if (current === undefined || current.id !== ref.id || current.revision !== ref.revision) {
+        throw Object.assign(new Error('stale goal revision'), { code: 'GOAL_STALE_REVISION' })
+      }
+      const next = {
+        ...current,
+        revision: current.revision + 1,
+        ...request.objective === undefined ? {} : { objective: request.objective },
+        ...request.maxGoalRounds === undefined ? {} : { maxGoalRounds: request.maxGoalRounds },
+        updatedAt: current.updatedAt + 1,
+      }
+      goalState.set(targetAgent.id, next)
+      appendGoalEvent(targetAgent.id, 'edit', next)
+      return next
+    },
+    pause(targetAgent, ref) {
+      return transitionGoal(targetAgent, ref, 'paused', 'pause')
+    },
+    resume(targetAgent, ref) {
+      return transitionGoal(targetAgent, ref, 'active', 'resume')
+    },
+    complete(targetAgent, ref) {
+      return transitionGoal(targetAgent, ref, 'complete', 'complete')
+    },
+    clear(targetAgent, ref) {
+      const current = goalState.get(targetAgent.id)
+      if (current === undefined || current.id !== ref.id || current.revision !== ref.revision) {
+        throw Object.assign(new Error('stale goal revision'), { code: 'GOAL_STALE_REVISION' })
+      }
+      goalState.delete(targetAgent.id)
+      appendGoalEvent(targetAgent.id, 'clear', { id: ref.id, revision: ref.revision + 1 })
+      return { id: ref.id, revision: ref.revision + 1 }
+    },
+  }
+
   const ctx = {
     logger: { info() {}, warn() {} },
+    get(name) {
+      return name === 'goals' ? goalService : undefined
+    },
     effect(run) {
       const dispose = run()
       return () => {
@@ -78,23 +185,31 @@ function createHarness(overrides = {}) {
         return () => {}
       },
     },
-    agents: { list: () => [agent] },
+    agents: {
+      list: () => [agent],
+      get: (id) => liveAgents.get(id),
+    },
     sessionController: {
       async list() {
         return { items: structuredClone(state.listItems) }
       },
+      async inspect(sessionId) {
+        return { events: structuredClone(goalEvents.get(sessionId) ?? []) }
+      },
       async resolveAgent(sessionId) {
-        return {
-          agent: {
-            id: sessionId,
-            followup(message) {
-              delivered.push({ sessionId, kind: 'followup', message })
-            },
-            steer(message) {
-              delivered.push({ sessionId, kind: 'steer', message })
-            },
+        resolveCalls.push(sessionId)
+        const existing = liveAgents.get(sessionId)
+        const target = existing ?? {
+          id: sessionId,
+          followup(message) {
+            delivered.push({ sessionId, kind: 'followup', message })
+          },
+          steer(message) {
+            delivered.push({ sessionId, kind: 'steer', message })
           },
         }
+        liveAgents.set(sessionId, target)
+        return { agent: target }
       },
       async create(request) {
         createRequests.push(request)
@@ -149,6 +264,11 @@ function createHarness(overrides = {}) {
     delivered,
     promptCalls,
     createRequests,
+    resolveCalls,
+    goalState,
+    goalEvents,
+    goalService,
+    liveAgents,
     state,
     agent,
     emit(event, ...args) {
@@ -182,7 +302,7 @@ async function main() {
     failOnWarnings: false,
   })
 
-  await check('registers 7 tools', () => assert.equal(harness.tools.size, 7))
+  await check('registers 11 tools', () => assert.equal(harness.tools.size, 11))
   await check('registers policy section', () => assert.equal(harness.sections.length, 1))
   await check('registers identity context', () => assert.equal(harness.contexts.length, 1))
   await check('identity text renders', () => {
@@ -199,6 +319,10 @@ async function main() {
   const archiveTool = harness.tools.get('mesh_archive_session')
   const cancelTool = harness.tools.get('mesh_cancel_session')
   const waitTool = harness.tools.get('mesh_wait_for_change')
+  const getGoalTool = harness.tools.get('mesh_get_goal')
+  const setGoalTool = harness.tools.get('mesh_set_goal')
+  const updateGoalTool = harness.tools.get('mesh_update_goal')
+  const clearGoalTool = harness.tools.get('mesh_clear_goal')
 
   await check('list excludes archived and paginates', async () => {
     const page = JSON.parse(await listTool.execute({ limit: 1 }, exec()))
@@ -338,6 +462,90 @@ async function main() {
     const result = JSON.parse(await waitTool.execute({ timeout_ms: 1000 }, exec()))
     assert.equal(result.timedOut, true)
     assert.ok(Date.now() - started >= 900)
+  })
+
+  await check('goal read of a cold session returns null without waking it', async () => {
+    const before = harness.resolveCalls.length
+    const result = JSON.parse(await getGoalTool.execute({ target: 'session-c' }, exec()))
+    assert.equal(result.goal, null)
+    assert.equal(result.live, false)
+    assert.equal(harness.resolveCalls.length, before, 'goal reads must not resume the target')
+  })
+
+  await check('goal create then edit with expected revision', async () => {
+    const created = JSON.parse(await setGoalTool.execute({ target: 'session-b', objective: 'ship v0.3', max_goal_rounds: 12 }, exec()))
+    assert.equal(created.action, 'created')
+    assert.equal(created.goal.phase, 'active')
+    assert.equal(created.goal.objective, 'ship v0.3')
+    assert.equal(created.goal.maxGoalRounds, 12)
+    const edited = JSON.parse(await setGoalTool.execute({
+      target: 'session-b',
+      objective: 'ship v0.3.1',
+      expected_revision: created.goal.revision,
+    }, exec()))
+    assert.equal(edited.action, 'edited')
+    assert.equal(edited.goal.revision, created.goal.revision + 1)
+    assert.equal(edited.goal.objective, 'ship v0.3.1')
+    const read = JSON.parse(await getGoalTool.execute({ target: 'session-b' }, exec()))
+    assert.equal(read.goal.revision, edited.goal.revision)
+    assert.equal(read.goal.phase, 'active')
+  })
+
+  await check('goal pause, resume and complete', async () => {
+    const paused = JSON.parse(await updateGoalTool.execute({
+      target: 'session-b', action: 'pause', expected_revision: 2,
+    }, exec()))
+    assert.equal(paused.goal.phase, 'paused')
+    const resumed = JSON.parse(await updateGoalTool.execute({
+      target: 'session-b', action: 'resume', expected_revision: paused.goal.revision,
+    }, exec()))
+    assert.equal(resumed.goal.phase, 'active')
+    const completed = JSON.parse(await updateGoalTool.execute({
+      target: 'session-b', action: 'complete', expected_revision: resumed.goal.revision,
+    }, exec()))
+    assert.equal(completed.goal.phase, 'complete')
+  })
+
+  await check('set replaces a completed goal', async () => {
+    const replaced = JSON.parse(await setGoalTool.execute({ target: 'session-b', objective: 'next objective' }, exec()))
+    assert.equal(replaced.action, 'created')
+    assert.notEqual(replaced.goal.id, 'goal-1')
+    assert.equal(replaced.goal.phase, 'active')
+  })
+
+  await check('stale revision is rejected', async () => {
+    await assert.rejects(
+      updateGoalTool.execute({ target: 'session-b', action: 'pause', expected_revision: 99 }, exec()),
+      /stale goal revision/,
+    )
+  })
+
+  await check('clear removes the goal', async () => {
+    const current = JSON.parse(await getGoalTool.execute({ target: 'session-b' }, exec()))
+    const cleared = JSON.parse(await clearGoalTool.execute({
+      target: 'session-b', expected_revision: current.goal.revision,
+    }, exec()))
+    assert.equal(cleared.cleared, true)
+    const after = JSON.parse(await getGoalTool.execute({ target: 'session-b' }, exec()))
+    assert.equal(after.goal, null)
+  })
+
+  await check('goal mutations respect allowGoal', async () => {
+    const disabled = createHarness()
+    apply(disabled.ctx, { allowGoal: false })
+    await assert.rejects(
+      disabled.tools.get('mesh_set_goal').execute({ target: 'session-b', objective: 'x' }, execFor(disabled)),
+      /goal management is disabled/,
+    )
+  })
+
+  await check('missing goal service is reported', async () => {
+    const noGoals = createHarness({ ctx: { get: () => undefined } })
+    apply(noGoals.ctx, {})
+    await assert.rejects(
+      noGoals.tools.get('mesh_set_goal').execute({ target: 'session-b', objective: 'x' }, execFor(noGoals)),
+      /goal service is not available/,
+    )
   })
 
   await check('policy off disables the section', () => {

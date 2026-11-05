@@ -10,6 +10,7 @@
         allowCreate: true
         allowArchive: true
         allowCancel: true
+        allowGoal: true             # CRUD on other sessions' long-term goals
         allowSteer: false           # peer steer can interrupt a human turn
         maxSendsPerMinute: 30
         allowArchivedSend: false

@@ -1,8 +1,8 @@
 {
   "name": "dsh-session-mesh",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Cross-session mesh: list every session in every workspace, message any session as a real agent message, create/rename/archive/cancel sessions, and wait for session changes.",
+  "description": "Cross-session mesh: list every session in every workspace, message any session as a real agent message, create/rename/archive/cancel sessions, manage other sessions' long-term goals, and wait for session changes.",
   "type": "module",
   "license": "MIT",
   "author": "kx2398",
