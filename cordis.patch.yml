@@ -5,13 +5,13 @@
     - id: session-mesh
       name: 'dsh-session-mesh'
       config:
-        defaultMode: queue          # queue | steer
+        defaultMode: queue          # queue | now ("now" = immediate steer)
         maxMessageBytes: 65536
         allowCreate: true
         allowArchive: true
         allowCancel: true
         allowGoal: true             # CRUD on other sessions' long-term goals
-        allowSteer: false           # peer steer can interrupt a human turn
+        allowImmediate: true        # allow mode=now (steer) delivery; legacy allowSteer:false is honored
         maxSendsPerMinute: 30
         allowArchivedSend: false
         identityContext: true

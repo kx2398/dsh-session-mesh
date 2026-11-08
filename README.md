@@ -17,10 +17,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.1
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.2
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.1.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.2.tgz
 ```
 
 ## 2. 它做什么
@@ -28,7 +28,7 @@ plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.1.tgz
 | 工具 | 能力 |
 |---|---|
 | `mesh_list_sessions` | 列出**所有工作区**的会话：sessionId、标题、所属工作区（id/title/path）、cwd、running、archived、agent 可用性、是否 subagent、更新时间。支持工作区/运行态/归档/subagent/ID或标题子串过滤 + 游标分页（`nextCursor`） |
-| `mesh_send_message` | 给**任意会话**发一条自包含消息，**以真实 `agent-message/relay` 消息投递**（source 带 `senderSessionId`，不伪装成人类消息）。运行中目标 `queue`（回合后）或 `steer`（步边界，默认禁用）；空闲目标被唤醒；冷会话自动恢复。有速率限制与重复抑制 |
+| `mesh_send_message` | 给**任意会话**发一条自包含消息，**以真实 `agent-message/relay` 消息投递**（source 带 `senderSessionId`，不伪装成人类消息）。按 `mode` 选择投递方式：`now`（立即，走 `agent.steer`，在目标下一个 step 边界投递，可插队正在跑的回合）；`queue`（默认，走 `agent.followup`，等目标当前回合结束）；空闲/冷目标都会被唤醒；有速率限制与重复抑制 |
 | `mesh_create_session` | 新建根会话：可指定工作区（id/路径/标题）、标题、初始 prompt、agent preset；不指定工作区时**默认为调用方所在工作区** |
 | `mesh_rename_session` | 改任意会话标题（pin 住，不被自动标题覆盖） |
 | `mesh_archive_session` | 归档/取消归档任意会话；运行中的会话默认拒绝并说明有哪些工作，`stop_activity: true` 时先停止再归档 |
@@ -58,7 +58,7 @@ mesh_* 工具
   ├─ 列会话   sessionController.list() + workspaceRegistry.list()（一次建 session→workspace 索引）
   │            + workspaceRegistry.archivedSessionIds + sessionQuery.readTitleSnapshots()（30s 标题缓存，只取当页）
   ├─ 发消息   sessionController.resolveAgent(target)
-  │            → agent.followup(relayUserMessage) / agent.steer(relayUserMessage)
+  │            → mode now: agent.steer(relayUserMessage) / mode queue: agent.followup(relayUserMessage)
   │            （消息 source = {kind:'agent-message', form:'relay', senderSessionId}；
   │              消息对象按 dsh-llm createUserMessage 的同一形态手工构造并深冻结，避免 import 依赖）
   ├─ 新建     sessionController.create({workspaceId|cwd, agentPreset}) → rename → prompt
@@ -75,7 +75,7 @@ mesh_* 工具
 - **转录**：`mesh_read_session` 用 `sessionQuery.readSession()` 读日志（不唤醒；0.2.1 回退 `inspect()`），配对 `tool/call` 与 `tool/result`（按 `turn:callId`），过滤 runtime-context/system-prompt 等内部注入，文本按 600/300/400 字符预览，取最近 N 条。
 
 - **性能**：列表先做不需要标题的过滤 → 排序 → 分页 → 只给当页读标题；带 `query` 时才读候选集标题。工作区映射一次 O(工作区×会话) 建索引，不再每行遍历。
-- **安全**：默认 `allowSteer: false`、`maxSendsPerMinute: 30`、同目标同内容 60s 内重复抑制；可选 `allowedPeers`/`blockedPeers`（精确 sessionId）白/黑名单；发送写 `ctx.logger.info` 审计。
+- **安全**：默认 `allowImmediate: true`、`maxSendsPerMinute: 30`、同目标同内容 60s 内重复抑制；可选 `allowedPeers`/`blockedPeers`（精确 sessionId）白/黑名单；发送写 `ctx.logger.info` 审计。
 - **可靠**：消息投递失败时错误信息带目标与错误码；`resolveAgent` 失败不会静默。
 - 工作区引用解析：精确 id → 精确路径 → 精确标题 → 唯一子串；多命中报歧义并列出候选。
 
@@ -83,13 +83,13 @@ mesh_* 工具
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `defaultMode` | `queue` | 发消息默认投递模式 |
+| `defaultMode` | `queue` | 发消息默认投递模式：`queue`（等当前回合）或 `now`（立即 steer） |
 | `maxMessageBytes` | `65536` | 含 mesh 信封的单条消息 UTF-8 字节上限 |
 | `allowCreate` | `true` | 允许创建会话 |
 | `allowArchive` | `true` | 允许归档/取消归档 |
 | `allowCancel` | `true` | 允许停止他人回合 |
 | `allowGoal` | `true` | 允许增删改 / 启停他人长期目标（读目标不受限） |
-| `allowSteer` | `false` | 允许 `steer` 投递（可能打断人类正在跑的回合） |
+| `allowImmediate` | `true` | 允许 `mode: "now"`（立即投递 = steer，可能插队正在跑的回合）；旧配置的 `allowSteer: false` 仍会禁用它 |
 | `maxSendsPerMinute` | `30` | 每个发送方每分钟发送上限 |
 | `allowArchivedSend` | `false` | 允许向已归档会话发消息 |
 | `identityContext` | `true` | 注入身份 runtime context |
@@ -111,16 +111,17 @@ mesh_* 工具
 ```powershell
 git clone https://github.com/kx2398/dsh-session-mesh.git
 cd dsh-session-mesh
-npm test        # node test/mock-apply.mjs，32 项
+npm test        # node test/mock-apply.mjs，34 项
 ```
 
-覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、`policy: off`。
+覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、`policy: off`。
 
 ### 在线验证
 
 - `mesh_list_sessions` 跨多个工作区返回全部会话，标题/运行态/归档态正确；游标分页可用。
 - `mesh_create_session` / `mesh_rename_session` / `mesh_archive_session` / 取消归档正常。
 - `mesh_send_message` 向空闲空白会话投递 → 目标被唤醒并跑完回合；目标会话日志中该消息的 `source` 为 `{"kind":"agent-message","form":"relay","senderSessionId":...}`。
+- `mode: "now"` 走 `agent.steer`（下一 step 立即投递），`mode: "queue"` 走 `agent.followup`（等当前回合结束）；两者都是真实 agent-message。
 - 目标 CRUD：给测试会话 create → edit → pause → resume → complete → clear；目标会话日志中出现对应的 `goal/change` 事件，读冷会话不唤醒目标。
 - 目标启停：start（创建）→ stop（paused）→ start（resumed）→ 幂等 no-op → clear。
 - 转录：对冷会话 `mesh_read_session` 返回最近若干条 human/assistant/tool/peer 记录，过滤内部注入消息，且不唤醒目标。

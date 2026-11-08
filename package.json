@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-mesh",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Cross-session mesh: list/message any session, create/rename/archive/cancel sessions, manage other sessions’ long-term goals, and read their recent transcripts.",
   "type": "module",

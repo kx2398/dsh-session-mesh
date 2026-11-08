@@ -321,7 +321,7 @@ async function main() {
   apply(harness.ctx, {
     defaultMode: 'queue',
     policy: 'short',
-    maxSendsPerMinute: 3,
+    maxSendsPerMinute: 6,
     failOnWarnings: false,
   })
 
@@ -391,10 +391,26 @@ async function main() {
     )
   })
 
-  await check('steer is disabled by default', async () => {
+  await check('now mode delivers immediately via steer', async () => {
+    const result = JSON.parse(await sendTool.execute({ target: 'session-b', message: 'now please', mode: 'now' }, exec()))
+    assert.equal(result.mode, 'now')
+    const delivery = harness.delivered.at(-1)
+    assert.equal(delivery.kind, 'steer')
+    assert.equal(delivery.message.source.kind, 'agent-message')
+  })
+
+  await check('legacy steer alias maps to now', async () => {
+    const result = JSON.parse(await sendTool.execute({ target: 'session-b', message: 'alias now', mode: 'steer' }, exec()))
+    assert.equal(result.mode, 'now')
+    assert.equal(harness.delivered.at(-1).kind, 'steer')
+  })
+
+  await check('immediate delivery can be disabled', async () => {
+    const disabled = createHarness()
+    apply(disabled.ctx, { allowImmediate: false })
     await assert.rejects(
-      sendTool.execute({ target: 'session-b', message: 'steer please', mode: 'steer' }, exec()),
-      /steer delivery is disabled/,
+      disabled.tools.get('mesh_send_message').execute({ target: 'session-b', message: 'blocked now', mode: 'now' }, execFor(disabled)),
+      /immediate delivery is disabled/,
     )
   })
 
@@ -406,11 +422,12 @@ async function main() {
   })
 
   await check('rate limit enforced', async () => {
-    // maxSendsPerMinute = 3; two sends already consumed (hello + duplicate bypass? duplicate does not consume).
+    // maxSendsPerMinute = 6; three sends already consumed (hello + now + alias).
     await sendTool.execute({ target: 'session-b', message: 'rate-1' }, exec())
     await sendTool.execute({ target: 'session-b', message: 'rate-2' }, exec())
+    await sendTool.execute({ target: 'session-b', message: 'rate-3' }, exec())
     await assert.rejects(
-      sendTool.execute({ target: 'session-b', message: 'rate-3' }, exec()),
+      sendTool.execute({ target: 'session-b', message: 'rate-4' }, exec()),
       /send rate limit reached/,
     )
   })
