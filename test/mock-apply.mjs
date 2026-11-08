@@ -319,9 +319,9 @@ async function check(name, fn) {
 async function main() {
   const harness = createHarness()
   apply(harness.ctx, {
-    defaultMode: 'queue',
+    defaultMode: 'now',
     policy: 'short',
-    maxSendsPerMinute: 6,
+    maxSendsPerMinute: 7,
     failOnWarnings: false,
   })
 
@@ -374,7 +374,7 @@ async function main() {
     assert.equal(result.senderSource, 'agent-message/relay')
     assert.equal(harness.delivered.length, 1)
     const delivery = harness.delivered[0]
-    assert.equal(delivery.kind, 'followup')
+    assert.equal(delivery.kind, 'steer', 'default mode is now (immediate)')
     assert.equal(delivery.message.role, 'user')
     assert.equal(delivery.message.source.kind, 'agent-message')
     assert.equal(delivery.message.source.senderSessionId, 'session-a')
@@ -397,6 +397,12 @@ async function main() {
     const delivery = harness.delivered.at(-1)
     assert.equal(delivery.kind, 'steer')
     assert.equal(delivery.message.source.kind, 'agent-message')
+  })
+
+  await check('queue mode waits for the current turn via followup', async () => {
+    const result = JSON.parse(await sendTool.execute({ target: 'session-b', message: 'queue please', mode: 'queue' }, exec()))
+    assert.equal(result.mode, 'queue')
+    assert.equal(harness.delivered.at(-1).kind, 'followup')
   })
 
   await check('legacy steer alias maps to now', async () => {
@@ -422,7 +428,7 @@ async function main() {
   })
 
   await check('rate limit enforced', async () => {
-    // maxSendsPerMinute = 6; three sends already consumed (hello + now + alias).
+    // maxSendsPerMinute = 7; four sends already consumed (hello + now + queue + alias).
     await sendTool.execute({ target: 'session-b', message: 'rate-1' }, exec())
     await sendTool.execute({ target: 'session-b', message: 'rate-2' }, exec())
     await sendTool.execute({ target: 'session-b', message: 'rate-3' }, exec())

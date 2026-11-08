@@ -17,10 +17,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.2
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.3
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.2.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.3.tgz
 ```
 
 ## 2. 它做什么
@@ -28,7 +28,7 @@ plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.2.tgz
 | 工具 | 能力 |
 |---|---|
 | `mesh_list_sessions` | 列出**所有工作区**的会话：sessionId、标题、所属工作区（id/title/path）、cwd、running、archived、agent 可用性、是否 subagent、更新时间。支持工作区/运行态/归档/subagent/ID或标题子串过滤 + 游标分页（`nextCursor`） |
-| `mesh_send_message` | 给**任意会话**发一条自包含消息，**以真实 `agent-message/relay` 消息投递**（source 带 `senderSessionId`，不伪装成人类消息）。按 `mode` 选择投递方式：`now`（立即，走 `agent.steer`，在目标下一个 step 边界投递，可插队正在跑的回合）；`queue`（默认，走 `agent.followup`，等目标当前回合结束）；空闲/冷目标都会被唤醒；有速率限制与重复抑制 |
+| `mesh_send_message` | 给**任意会话**发一条自包含消息，**以真实 `agent-message/relay` 消息投递**（source 带 `senderSessionId`，不伪装成人类消息）。按 `mode` 选择投递方式：`now`（**默认**，立即，走 `agent.steer`，在目标下一个 step 边界投递，可插队正在跑的回合）；`queue`（显式排队，走 `agent.followup`，等目标当前回合结束）；空闲/冷目标都会被唤醒；有速率限制与重复抑制 |
 | `mesh_create_session` | 新建根会话：可指定工作区（id/路径/标题）、标题、初始 prompt、agent preset；不指定工作区时**默认为调用方所在工作区** |
 | `mesh_rename_session` | 改任意会话标题（pin 住，不被自动标题覆盖） |
 | `mesh_archive_session` | 归档/取消归档任意会话；运行中的会话默认拒绝并说明有哪些工作，`stop_activity: true` 时先停止再归档 |
@@ -83,7 +83,7 @@ mesh_* 工具
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `defaultMode` | `queue` | 发消息默认投递模式：`queue`（等当前回合）或 `now`（立即 steer） |
+| `defaultMode` | `now` | 发消息默认投递模式：`now`（立即 steer，默认）或 `queue`（等当前回合） |
 | `maxMessageBytes` | `65536` | 含 mesh 信封的单条消息 UTF-8 字节上限 |
 | `allowCreate` | `true` | 允许创建会话 |
 | `allowArchive` | `true` | 允许归档/取消归档 |
@@ -111,10 +111,10 @@ mesh_* 工具
 ```powershell
 git clone https://github.com/kx2398/dsh-session-mesh.git
 cd dsh-session-mesh
-npm test        # node test/mock-apply.mjs，34 项
+npm test        # node test/mock-apply.mjs，35 项
 ```
 
-覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、`policy: off`。
+覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、`policy: off`。
 
 ### 在线验证
 

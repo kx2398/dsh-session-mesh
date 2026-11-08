@@ -32,7 +32,7 @@ export const inject = [
 const MESH_TAG = '[mesh]'
 
 /** Compact collaboration guidance injected for every root session. */
-const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" (default) waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
+const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
 
 /** Detailed collaboration guidance for deployments that opt into it. */
 const POLICY_FULL = `${POLICY_SHORT}
@@ -169,7 +169,7 @@ function describeAgentError(error) {
 /** Install the mesh plugin. */
 export function apply(ctx, config = {}) {
   const settings = {
-    defaultMode: config.defaultMode === 'now' || config.defaultMode === 'steer' ? 'now' : 'queue',
+    defaultMode: config.defaultMode === 'queue' ? 'queue' : 'now',
     maxMessageBytes: Number.isSafeInteger(config.maxMessageBytes) && config.maxMessageBytes > 0
       ? config.maxMessageBytes
       : 65536,
@@ -706,7 +706,7 @@ export function apply(ctx, config = {}) {
         properties: {
           target: { type: 'string', description: 'Exact target session id from mesh_list_sessions. Never your own session id.' },
           message: { type: 'string', description: 'Complete message for the target session. The target cannot see your conversation, so include all needed context.' },
-          mode: { type: 'string', enum: ['now', 'queue', 'steer'], description: 'now delivers immediately at the target\'s next step boundary (steer; can preempt a running turn\'s plan), queue delivers after the target\'s current turn (default). "steer" is a legacy alias for "now".' },
+          mode: { type: 'string', enum: ['now', 'queue', 'steer'], description: 'now (default) delivers immediately at the target\'s next step boundary (steer; can preempt a running turn\'s plan), queue delivers after the target\'s current turn. "steer" is a legacy alias for "now".' },
         },
       },
       output: TEXT_OUTPUT,

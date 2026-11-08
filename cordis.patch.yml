@@ -5,7 +5,7 @@
     - id: session-mesh
       name: 'dsh-session-mesh'
       config:
-        defaultMode: queue          # queue | now ("now" = immediate steer)
+        defaultMode: now            # now (immediate steer, default) | queue
         maxMessageBytes: 65536
         allowCreate: true
         allowArchive: true
