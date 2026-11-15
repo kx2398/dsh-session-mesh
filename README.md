@@ -17,10 +17,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.4
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.5
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.4.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.5.tgz
 ```
 
 ## 2. 它做什么

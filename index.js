@@ -39,7 +39,7 @@ const POLICY_FULL = `${POLICY_SHORT}
 
 The mesh spans all workspaces. Sessions do not share conversation history; they share the filesystem only where their working directories overlap. Include every fact a peer needs, reference files by absolute paths, and never send secrets. Never message your own session.
 
-Message modes: "queue" delivers after the target's current turn (default, safe for running sessions); "steer" delivers at the target's nearest step boundary and may be disabled by the deployment. A successful send only means the target accepted the message; it does not confirm that the target started, finished, or even read it. Do not start ping-pong loops, do not forward whole conversations, and do not send acknowledgements.
+Message modes: "now" (default) delivers immediately at the target's next step boundary and can preempt a running turn's plan; "queue" waits for the target's current turn. A deployment can disable immediate delivery, in which case queue is the only mode. A successful send only means the target accepted the message; it does not confirm that the target started, finished, or even read it. Do not start ping-pong loops, do not forward whole conversations, and do not send acknowledgements.
 
 Goals: a session keeps at most one long-term goal with a phase (active, paused, blocked, complete) and a round budget. mesh_set_goal creates a goal when none exists or the current one is complete, otherwise edits objective and/or round cap in place; mesh_update_goal pauses, resumes or completes the current goal; mesh_clear_goal removes it (history stays in the target log). Always mesh_get_goal first and pass the observed expected_revision to mutations: a stale revision is rejected, so never guess. Goal writes wake a cold target; goal reads do not.`
 
@@ -698,7 +698,7 @@ export function apply(ctx, config = {}) {
     disposers.push(ctx.tools.register({
       name: 'mesh_send_message',
       description:
-        'Send one self-contained message to any session in any workspace. The message is delivered as a real agent message carrying your session id as its sender. A running target receives it after its current turn (queue) or at its nearest step boundary (steer, when enabled); an idle target wakes and starts a turn; a cold target is resumed. Success means acceptance into the target inbox, not completion. Messages are rate-limited and identical repeats within a minute are suppressed.',
+        'Send one self-contained message to any session in any workspace. The message is delivered as a real agent message carrying your session id as its sender. A running target receives it at its next step boundary (mode "now", the default) or after its current turn (mode "queue"); an idle target wakes and starts a turn; a cold target is resumed. Success means acceptance into the target inbox, not completion. Messages are rate-limited and identical repeats within a minute are suppressed.',
       parameters: {
         type: 'object',
         additionalProperties: false,
