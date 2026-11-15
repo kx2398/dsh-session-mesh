@@ -620,7 +620,10 @@ async function main() {
     })
     harness.appendTranscriptEvent('session-b', {
       type: 'user/message',
-      data: { content: [{ type: 'text', text: 'runtime context noise' }], source: { kind: 'runtime-context' } },
+      data: {
+        content: [{ type: 'text', text: '<system-reminder>\nRuntime context snapshot (DSH 0.2.2-rc.3 framing)\n</system-reminder>' }],
+        source: { kind: 'runtime-context', form: 'snapshot', sections: [] },
+      },
     })
     harness.appendTranscriptEvent('session-b', {
       type: 'user/message',
@@ -655,6 +658,7 @@ async function main() {
     assert.equal(page.entries[1].name, 'grep')
     assert.equal(page.entries[1].result, 'grep result text')
     assert.equal(page.entries[2].source, 'peer')
+    assert.ok(page.entries.every((entry) => !entry.text || !entry.text.includes('<system-reminder>')), 'runtime-context reminders must stay filtered')
     assert.equal(harness.resolveCalls.length, before, 'transcript reads must not wake the target')
     const noTools = JSON.parse(await readSessionTool.execute({ target: 'session-b', limit: 2, include_tools: false }, exec()))
     assert.deepEqual(noTools.entries.map((entry) => entry.role), ['assistant', 'user'])

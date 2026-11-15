@@ -9,7 +9,7 @@
 - 零运行时依赖、无构建步骤、纯 ESM
 - 14 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
 - 分发方式：GitHub tag / Release tarball（**不发布到 npm**）
-- 兼容性：已在 DSH **0.2.1-rc.3** 与 **0.2.2-rc.1** 上验证；0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`
+- 兼容性：已在 DSH **0.2.1-rc.3**、**0.2.2-rc.1** 与 **0.2.2-rc.3** 上验证。0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`；0.2.2-rc.3 的 runtime-context 提醒包装按 `source.kind` 过滤，不影响转录。归档清理工作树属于宿主行为（见限制 10）。
 
 ---
 
@@ -17,10 +17,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.3
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.4
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.3.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.4.tgz
 ```
 
 ## 2. 它做什么
@@ -114,7 +114,7 @@ cd dsh-session-mesh
 npm test        # node test/mock-apply.mjs，35 项
 ```
 
-覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、`policy: off`。
+覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、**0.2.2-rc.3 runtime-context 提醒包装过滤**、`policy: off`。
 
 ### 在线验证
 
@@ -125,6 +125,7 @@ npm test        # node test/mock-apply.mjs，35 项
 - 目标 CRUD：给测试会话 create → edit → pause → resume → complete → clear；目标会话日志中出现对应的 `goal/change` 事件，读冷会话不唤醒目标。
 - 目标启停：start（创建）→ stop（paused）→ start（resumed）→ 幂等 no-op → clear。
 - 转录：对冷会话 `mesh_read_session` 返回最近若干条 human/assistant/tool/peer 记录，过滤内部注入消息，且不唤醒目标。
+- 0.2.2-rc.3 实测：list / create / send(默认 now) / wait / rename / archive / unarchive / goal start-stop-start-clear / 冷读转录 / 冷读目标 全部正常；0.2.2-rc.3 的 runtime-context 提醒（`<system-reminder>` + `sections`）不进入转录。
 
 ## 7. 已知限制
 
@@ -137,6 +138,7 @@ npm test        # node test/mock-apply.mjs，35 项
 7. **目标写入会唤醒目标会话**：`mesh_set_goal` / `mesh_update_goal` / `mesh_clear_goal` / `mesh_start_goal` / `mesh_stop_goal` 需要目标的 live Agent，冷会话会先被恢复；只有 `mesh_get_goal` / `mesh_read_session` 保证不唤醒。目标服务（`dsh-goal`）未挂载时目标工具会明确报错。
 8. **一个会话只有一个目标**：与宿主语义一致；非 complete 目标需先 edit/pause/resume 或 clear 才能被替换。目标 phase 与 round 预算的自动续行仍由宿主的 goal round driver 负责，本插件只负责跨会话管理状态。
 9. **转录是预览不是完整历史**：`mesh_read_session` 每条文本会截断（600/300/400 字符），默认只取最近 20 条（最多 50）；它读完整日志后截取，超长会话的读取成本与磁盘日志大小成正比。
+10. **归档会清理干净工作树（DSH ≥0.2.2-rc.1）**：宿主归档时会删除它创建的干净 worktree（分支和提交保留），未提交、被忽略或 skip-worktree/assume-unchanged 的改动会丢失；需要保留时先 `git worktree lock <path>`，或开启 worktree 服务的 `retainOnArchive`。本插件只调用 `archiveSession`，清理由宿主完成。
 
 ## 8. 与生态现有插件的关系
 
