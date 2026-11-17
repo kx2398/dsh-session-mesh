@@ -11,6 +11,7 @@
         allowArchive: true
         allowCancel: true
         allowGoal: true             # CRUD on other sessions' long-term goals
+        allowTeam: true             # read/switch other sessions' per-session Agent Teams mode
         allowImmediate: true        # allow mode=now (steer) delivery; legacy allowSteer:false is honored
         maxSendsPerMinute: 30
         allowArchivedSend: false

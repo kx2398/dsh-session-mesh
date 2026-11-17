@@ -36,6 +36,8 @@ function createHarness(overrides = {}) {
   const goalState = new Map()
   const goalEvents = new Map()
   const transcriptEvents = new Map()
+  const teamEnabled = new Map()
+  const teamSetCalls = []
   let eventSeq = 0
   let goalCounter = 0
   const liveAgents = new Map()
@@ -158,10 +160,22 @@ function createHarness(overrides = {}) {
     },
   }
 
+  const teamService = {
+    isEnabled(targetAgent) {
+      return teamEnabled.get(targetAgent.id) === true
+    },
+    async setEnabled(targetAgent, enabled) {
+      teamSetCalls.push({ sessionId: targetAgent.id, enabled })
+      teamEnabled.set(targetAgent.id, enabled)
+    },
+  }
+
   const ctx = {
     logger: { info() {}, warn() {} },
     get(name) {
-      return name === 'goals' ? goalService : undefined
+      if (name === 'goals') return goalService
+      if (name === 'agentTeams') return teamService
+      return undefined
     },
     effect(run) {
       const dispose = run()
@@ -239,6 +253,15 @@ function createHarness(overrides = {}) {
       async cancel() {
         return { accepted: true }
       },
+      async projections(request) {
+        const sessionId = request?.sessionId
+        return {
+          kind: 'sequenced',
+          values: {
+            agentTeam: { enabled: teamEnabled.get(sessionId) === true, tasks: [] },
+          },
+        }
+      },
     },
     workspaceRegistry: {
       list: () => [WS_TEST, WS_OTHER],
@@ -291,6 +314,9 @@ function createHarness(overrides = {}) {
     transcriptEvents,
     appendTranscriptEvent,
     goalService,
+    teamService,
+    teamEnabled,
+    teamSetCalls,
     liveAgents,
     state,
     agent,
@@ -325,7 +351,7 @@ async function main() {
     failOnWarnings: false,
   })
 
-  await check('registers 14 tools', () => assert.equal(harness.tools.size, 14))
+  await check('registers 16 tools', () => assert.equal(harness.tools.size, 16))
   await check('registers policy section', () => assert.equal(harness.sections.length, 1))
   await check('registers identity context', () => assert.equal(harness.contexts.length, 1))
   await check('identity text renders', () => {
@@ -348,6 +374,8 @@ async function main() {
   const clearGoalTool = harness.tools.get('mesh_clear_goal')
   const startGoalTool = harness.tools.get('mesh_start_goal')
   const stopGoalTool = harness.tools.get('mesh_stop_goal')
+  const getTeamTool = harness.tools.get('mesh_get_team_mode')
+  const setTeamTool = harness.tools.get('mesh_set_team_mode')
   const readSessionTool = harness.tools.get('mesh_read_session')
 
   await check('list excludes archived and paginates', async () => {
@@ -611,6 +639,57 @@ async function main() {
     const noop = JSON.parse(await startGoalTool.execute({ target: 'session-c', expected_revision: restarted.goal.revision }, exec()))
     assert.equal(noop.action, 'already-active')
     await clearGoalTool.execute({ target: 'session-c', expected_revision: noop.goal.revision }, exec())
+  })
+
+  await check('read team mode of a live session', async () => {
+    harness.teamEnabled.set('session-a', true)
+    const page = JSON.parse(await getTeamTool.execute({ target: 'session-a' }, exec()))
+    assert.equal(page.enabled, true)
+    assert.equal(page.source, 'live')
+  })
+
+  await check('read team mode of a cold session via projection', async () => {
+    harness.liveAgents.delete('session-b')
+    harness.teamEnabled.set('session-b', true)
+    const page = JSON.parse(await getTeamTool.execute({ target: 'session-b' }, exec()))
+    assert.equal(page.enabled, true)
+    assert.equal(page.source, 'projection')
+  })
+
+  await check('set team mode switches the selection', async () => {
+    const disabled = JSON.parse(await setTeamTool.execute({ target: 'session-b', enabled: false }, exec()))
+    assert.equal(disabled.enabled, false)
+    assert.equal(disabled.changed, true)
+    const repeated = JSON.parse(await setTeamTool.execute({ target: 'session-b', enabled: false }, exec()))
+    assert.equal(repeated.changed, false)
+    const enabled = JSON.parse(await setTeamTool.execute({ target: 'session-b', enabled: true }, exec()))
+    assert.equal(enabled.enabled, true)
+    assert.equal(enabled.changed, true)
+    assert.equal(harness.teamSetCalls.at(-1).enabled, true)
+  })
+
+  await check('team mode management respects allowTeam', async () => {
+    const blocked = createHarness()
+    apply(blocked.ctx, { allowTeam: false })
+    await assert.rejects(
+      blocked.tools.get('mesh_set_team_mode').execute({ target: 'session-b', enabled: true }, execFor(blocked)),
+      /team mode management is disabled/,
+    )
+  })
+
+  await check('set team mode rejects a subagent target', async () => {
+    const sub = createHarness()
+    sub.liveAgents.set('session-sub', { id: 'session-sub', session: { header: { origin: 'subagent' } } })
+    apply(sub.ctx, {})
+    await assert.rejects(
+      sub.tools.get('mesh_set_team_mode').execute({ target: 'session-sub', enabled: true }, execFor(sub)),
+      /subagent/,
+    )
+  })
+
+  await check('list include_team adds the mode per row', async () => {
+    const page = JSON.parse(await listTool.execute({ include_team: true, limit: 3 }, exec()))
+    assert.ok(page.sessions.every((row) => typeof row.teamMode === 'boolean'))
   })
 
   await check('read transcript summarizes human/assistant/tool/peer entries', async () => {

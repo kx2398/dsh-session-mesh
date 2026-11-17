@@ -7,9 +7,9 @@
 - License: MIT
 - 要求：DSH `>=0.2.1-rc.3 <0.3.0`（`engines.dsh`）；desktop / web-app 这类包含标准 Host 服务的 profile
 - 零运行时依赖、无构建步骤、纯 ESM
-- 14 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
+- 16 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
 - 分发方式：GitHub tag / Release tarball（**不发布到 npm**）
-- 兼容性：已在 DSH **0.2.1-rc.3**、**0.2.2-rc.1** 与 **0.2.2-rc.3** 上验证。0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`；0.2.2-rc.3 的 runtime-context 提醒包装按 `source.kind` 过滤，不影响转录。归档清理工作树属于宿主行为（见限制 10）。
+- 兼容性：已在 DSH **0.2.1-rc.3**、**0.2.2-rc.1** 与 **0.2.2-rc.3** 上验证。0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`；0.2.2-rc.3 的 runtime-context 提醒包装按 `source.kind` 过滤，不影响转录。Agent Teams 开关自 DSH 0.2.1-rc.2 起是**会话级**选择（`team/mode`），本插件可跨会话读取与切换（`mesh_get_team_mode` / `mesh_set_team_mode`）。归档清理工作树属于宿主行为（见限制 10）。
 
 ---
 
@@ -17,17 +17,17 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.4.5
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.5.0
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.5.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.5.0.tgz
 ```
 
 ## 2. 它做什么
 
 | 工具 | 能力 |
 |---|---|
-| `mesh_list_sessions` | 列出**所有工作区**的会话：sessionId、标题、所属工作区（id/title/path）、cwd、running、archived、agent 可用性、是否 subagent、更新时间。支持工作区/运行态/归档/subagent/ID或标题子串过滤 + 游标分页（`nextCursor`） |
+| `mesh_list_sessions` | 列出**所有工作区**的会话：sessionId、标题、所属工作区（id/title/path）、cwd、running、archived、agent 可用性、是否 subagent、更新时间。支持工作区/运行态/归档/subagent/ID或标题子串过滤 + 游标分页（`nextCursor`）；`include_team: true` 时附带每行 Team 模式（`teamMode` / `teamModeSource` / `teamTasks`） |
 | `mesh_send_message` | 给**任意会话**发一条自包含消息，**以真实 `agent-message/relay` 消息投递**（source 带 `senderSessionId`，不伪装成人类消息）。按 `mode` 选择投递方式：`now`（**默认**，立即，走 `agent.steer`，在目标下一个 step 边界投递，可插队正在跑的回合）；`queue`（显式排队，走 `agent.followup`，等目标当前回合结束）；空闲/冷目标都会被唤醒；有速率限制与重复抑制 |
 | `mesh_create_session` | 新建根会话：可指定工作区（id/路径/标题）、标题、初始 prompt、agent preset；不指定工作区时**默认为调用方所在工作区** |
 | `mesh_rename_session` | 改任意会话标题（pin 住，不被自动标题覆盖） |
@@ -40,9 +40,13 @@ plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.4.5.tgz
 | `mesh_clear_goal` | 删当前目标（历史保留在目标会话日志里） |
 | `mesh_start_goal` | **启**：无目标/已完成则创建（需 objective），paused/blocked 则 resume，已 active 且 armed 时幂等返回 |
 | `mesh_stop_goal` | **停**：把目标 pause（停止自动续行、保留 phase/revision）；已 paused/blocked/complete 时幂等返回 |
+| `mesh_get_team_mode` | 读任意会话的**会话级 Agent Teams 开关**（`team/mode`）：live 走 `ctx.agentTeams.isEnabled`，冷会话走 `agentTeam` 投影，不唤醒目标 |
+| `mesh_set_team_mode` | 切换任意**根会话**的 Agent Teams 开关：作用于该会话整棵 subagent 树的 Team 工具与提示词，保留任务与子代理，持久化；冷会话会被唤醒 |
 | `mesh_read_session` | **看**：读任意会话最近 N 条对话记录（人 / peer / assistant / 工具调用与结果），默认 20 条、最多 50；按时间正序、文本截断；读日志不唤醒目标 |
 
 所有目标写操作都要求先 `mesh_get_goal` 并把观测到的 `expected_revision` 传进来：过期 revision 会被拒绝，不会静默覆盖。目标状态存在**目标会话自己的日志**（`goal/change` 事件），随会话恢复/fork 持久化。`mesh_read_session` 会过滤掉 runtime-context / system-prompt 等内部注入消息，只保留人、peer、assistant 与工具记录。
+
+Agent Teams 模式是宿主自 DSH 0.2.1-rc.2 起的**会话级**选择：存在根会话日志的 `team/mode` 事件里（没有该事件但有旧任务板的会话视为开启）。关闭 Team 只移除 Team 任务工具与提示词，不停止子代理、不删除任务；恢复会话后选择仍然有效。
 
 模型可见文本两段：
 
@@ -69,10 +73,14 @@ mesh_* 工具
   ├─ 目标     读：live agent 的 ctx.goals.get() → 否则 sessionQuery.readSession() 折叠 goal/change
   │           写：sessionController.resolveAgent(target) → ctx.goals.create/edit/pause/resume/complete/clear
   │               （ref = {id, revision}，compare-and-set；ctx.goals 用 ctx.get('goals') 可选获取）
+  ├─ Team     读：agentTeams.isEnabled(live) → 否则 sessionController.projections() 的 agentTeam → 否则日志折叠 team/mode`
+  │           写：sessionController.resolveAgent(target) → ctx.agentTeams.setEnabled(agent, enabled)（仅根会话）
   └─ 转录     sessionQuery.readSession(target) → 事件过滤/配对（user·peer·assistant·tool call+result）
 ```
 
 - **转录**：`mesh_read_session` 用 `sessionQuery.readSession()` 读日志（不唤醒；0.2.1 回退 `inspect()`），配对 `tool/call` 与 `tool/result`（按 `turn:callId`），过滤 runtime-context/system-prompt 等内部注入，文本按 600/300/400 字符预览，取最近 N 条。
+
+- **Team 模式**：读优先 `ctx.agentTeams.isEnabled(live)`，否则 `sessionController.projections()` 的 `agentTeam` 值（冷读、不唤醒），再否则折叠 `team/mode` 日志；写要求目标是根会话（subagent 继承根的选择），用 `resolveAgent` 后调 `ctx.agentTeams.setEnabled`。
 
 - **性能**：列表先做不需要标题的过滤 → 排序 → 分页 → 只给当页读标题；带 `query` 时才读候选集标题。工作区映射一次 O(工作区×会话) 建索引，不再每行遍历。
 - **安全**：默认 `allowImmediate: true`、`maxSendsPerMinute: 30`、同目标同内容 60s 内重复抑制；可选 `allowedPeers`/`blockedPeers`（精确 sessionId）白/黑名单；发送写 `ctx.logger.info` 审计。
@@ -89,6 +97,7 @@ mesh_* 工具
 | `allowArchive` | `true` | 允许归档/取消归档 |
 | `allowCancel` | `true` | 允许停止他人回合 |
 | `allowGoal` | `true` | 允许增删改 / 启停他人长期目标（读目标不受限） |
+| `allowTeam` | `true` | 允许读取与切换他人会话的 Agent Teams 模式（读不受此限） |
 | `allowImmediate` | `true` | 允许 `mode: "now"`（立即投递 = steer，可能插队正在跑的回合）；旧配置的 `allowSteer: false` 仍会禁用它 |
 | `maxSendsPerMinute` | `30` | 每个发送方每分钟发送上限 |
 | `allowArchivedSend` | `false` | 允许向已归档会话发消息 |
@@ -111,10 +120,10 @@ mesh_* 工具
 ```powershell
 git clone https://github.com/kx2398/dsh-session-mesh.git
 cd dsh-session-mesh
-npm test        # node test/mock-apply.mjs，35 项
+npm test        # node test/mock-apply.mjs，41 项
 ```
 
-覆盖：14 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、**0.2.2-rc.3 runtime-context 提醒包装过滤**、`policy: off`。
+覆盖：16 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、**0.2.2-rc.3 runtime-context 提醒包装过滤**、**Team 模式读取（live / projection）与切换（含 subagent 拒绝、allowTeam 开关、include_team）**、`policy: off`。
 
 ### 在线验证
 
@@ -125,6 +134,7 @@ npm test        # node test/mock-apply.mjs，35 项
 - 目标 CRUD：给测试会话 create → edit → pause → resume → complete → clear；目标会话日志中出现对应的 `goal/change` 事件，读冷会话不唤醒目标。
 - 目标启停：start（创建）→ stop（paused）→ start（resumed）→ 幂等 no-op → clear。
 - 转录：对冷会话 `mesh_read_session` 返回最近若干条 human/assistant/tool/peer 记录，过滤内部注入消息，且不唤醒目标。
+- Team 模式：`mesh_list_sessions(include_team: true)` 返回每行开关；`mesh_get_team_mode` 对 live / 冷会话分别走 live / projection 且不唤醒；`mesh_set_team_mode` 对测试会话 enable → disable 均成功并持久化。
 - 0.2.2-rc.3 实测：list / create / send(默认 now) / wait / rename / archive / unarchive / goal start-stop-start-clear / 冷读转录 / 冷读目标 全部正常；0.2.2-rc.3 的 runtime-context 提醒（`<system-reminder>` + `sections`）不进入转录。
 
 ## 7. 已知限制
@@ -139,6 +149,7 @@ npm test        # node test/mock-apply.mjs，35 项
 8. **一个会话只有一个目标**：与宿主语义一致；非 complete 目标需先 edit/pause/resume 或 clear 才能被替换。目标 phase 与 round 预算的自动续行仍由宿主的 goal round driver 负责，本插件只负责跨会话管理状态。
 9. **转录是预览不是完整历史**：`mesh_read_session` 每条文本会截断（600/300/400 字符），默认只取最近 20 条（最多 50）；它读完整日志后截取，超长会话的读取成本与磁盘日志大小成正比。
 10. **归档会清理干净工作树（DSH ≥0.2.2-rc.1）**：宿主归档时会删除它创建的干净 worktree（分支和提交保留），未提交、被忽略或 skip-worktree/assume-unchanged 的改动会丢失；需要保留时先 `git worktree lock <path>`，或开启 worktree 服务的 `retainOnArchive`。本插件只调用 `archiveSession`，清理由宿主完成。
+11. **Team 模式只作用于根会话的子树**：`mesh_set_team_mode` 只能切换根会话，subagent 继承其存活根的开关；切换会唤醒冷会话，但不会停止已运行的子代理、不会删除任务，选择持久化。
 
 ## 8. 与生态现有插件的关系
 

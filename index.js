@@ -32,7 +32,7 @@ export const inject = [
 const MESH_TAG = '[mesh]'
 
 /** Compact collaboration guidance injected for every root session. */
-const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
+const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_get_team_mode reads and mesh_set_team_mode switches the per-session Agent Teams mode — the "use agent team" switch that adds Team task tools and guidance to a root session's whole subagent tree; Team mode persists, reads do not wake the target, and mesh_list_sessions can include each session's mode with include_team. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
 
 /** Detailed collaboration guidance for deployments that opt into it. */
 const POLICY_FULL = `${POLICY_SHORT}
@@ -41,7 +41,9 @@ The mesh spans all workspaces. Sessions do not share conversation history; they 
 
 Message modes: "now" (default) delivers immediately at the target's next step boundary and can preempt a running turn's plan; "queue" waits for the target's current turn. A deployment can disable immediate delivery, in which case queue is the only mode. A successful send only means the target accepted the message; it does not confirm that the target started, finished, or even read it. Do not start ping-pong loops, do not forward whole conversations, and do not send acknowledgements.
 
-Goals: a session keeps at most one long-term goal with a phase (active, paused, blocked, complete) and a round budget. mesh_set_goal creates a goal when none exists or the current one is complete, otherwise edits objective and/or round cap in place; mesh_update_goal pauses, resumes or completes the current goal; mesh_clear_goal removes it (history stays in the target log). Always mesh_get_goal first and pass the observed expected_revision to mutations: a stale revision is rejected, so never guess. Goal writes wake a cold target; goal reads do not.`
+Goals: a session keeps at most one long-term goal with a phase (active, paused, blocked, complete) and a round budget. mesh_set_goal creates a goal when none exists or the current one is complete, otherwise edits objective and/or round cap in place; mesh_update_goal pauses, resumes or completes the current goal; mesh_clear_goal removes it (history stays in the target log). Always mesh_get_goal first and pass the observed expected_revision to mutations: a stale revision is rejected, so never guess. Goal writes wake a cold target; goal reads do not.
+
+Agent Teams: DSH stores the "use agent team" switch per root session in its log as a \`team/mode\` selection, and the selection covers the whole subagent tree. mesh_get_team_mode reads it without waking the target; mesh_set_team_mode switches it and may resume a cold target (the target must be a root session; a subagent inherits its root's mode). Switching Team mode does not stop running children and does not delete tasks, and it persists across restarts. mesh_list_sessions can include the mode per returned row with include_team.`
 
 /** Text-only tool output rendering: one compact JSON line. */
 const TEXT_OUTPUT = {
@@ -177,6 +179,7 @@ export function apply(ctx, config = {}) {
     allowArchive: config.allowArchive !== false,
     allowCancel: config.allowCancel !== false,
     allowGoal: config.allowGoal !== false,
+    allowTeam: config.allowTeam !== false,
     allowArchivedSend: config.allowArchivedSend === true,
     // Immediate delivery ("now" = steer) is available by default; the legacy
     // allowSteer:false explicit opt-out is still honored for old deployments.
@@ -460,11 +463,14 @@ export function apply(ctx, config = {}) {
    * is the cross-version cold-safe reader, so it is preferred and the old
    * inspect path is kept only as a fallback for 0.2.1 deployments.
    */
-  async function readSessionEvents(exec, sessionId) {
+  async function readSessionSnapshot(exec, sessionId) {
     if (typeof ctx.sessionQuery.readSession === 'function') {
       try {
         const snapshot = await ctx.sessionQuery.readSession(sessionId)
-        return Array.isArray(snapshot?.events) ? snapshot.events : []
+        return {
+          events: Array.isArray(snapshot?.events) ? snapshot.events : [],
+          inheritedEventCount: Number.isSafeInteger(snapshot?.inheritedEventCount) ? snapshot.inheritedEventCount : 0,
+        }
       } catch (error) {
         throw new Error(`cannot read session "${sessionId}": ${describeAgentError(error)}`)
       }
@@ -472,12 +478,16 @@ export function apply(ctx, config = {}) {
     if (typeof ctx.sessionController.inspect === 'function') {
       try {
         const inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
-        return Array.isArray(inspection?.events) ? inspection.events : []
+        return { events: Array.isArray(inspection?.events) ? inspection.events : [], inheritedEventCount: 0 }
       } catch (error) {
         throw new Error(`cannot inspect session "${sessionId}": ${describeAgentError(error)}`)
       }
     }
     throw new Error(`cannot read session "${sessionId}": this DSH build exposes neither sessionQuery.readSession nor sessionController.inspect`)
+  }
+
+  async function readSessionEvents(exec, sessionId) {
+    return (await readSessionSnapshot(exec, sessionId)).events
   }
 
   /** Read one session goal without waking the session. */
@@ -509,6 +519,84 @@ export function apply(ctx, config = {}) {
     const targetAgent = resolved?.agent
     if (targetAgent === undefined) throw new Error(`cannot resolve target session "${sessionId}"`)
     return targetAgent
+  }
+
+  /**
+   * Read one session's cached projection values without waking it.
+   * DSH 0.2.2 exposes `sessionController.projections`; older builds fall back
+   * to folding the persisted log instead.
+   */
+  async function readProjectionValues(exec, sessionId) {
+    if (typeof ctx.sessionController.projections !== 'function') return undefined
+    try {
+      const value = await ctx.sessionController.projections({ sessionId }, exec.signal)
+      return value?.values
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Fold `team/mode` and legacy `team/task` events into the per-session Agent
+   * Teams selection, mirroring the host's agent-team projection: the last
+   * `team/mode` event wins; a legacy board without a saved choice stays on.
+   */
+  function foldTeamMode(snapshot, sessionId) {
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : []
+    const inherited = Number.isSafeInteger(snapshot?.inheritedEventCount) ? snapshot.inheritedEventCount : 0
+    let enabled
+    for (const event of events) {
+      if (event.type === 'team/mode') {
+        if (event.seq < inherited) continue
+        const data = event.data
+        if (data !== null && typeof data === 'object' && typeof data.enabled === 'boolean') enabled = data.enabled
+        continue
+      }
+      if (event.type === 'team/task' && enabled === undefined) {
+        const data = event.data
+        if (data?.teamId === sessionId) enabled = true
+      }
+    }
+    return enabled === true
+  }
+
+  /**
+   * Read the per-session Agent Teams mode without waking the target. The live
+   * agent (when present) is authoritative, then the persisted `agentTeam`
+   * projection, then a log fold for builds without either.
+   */
+  async function readTeamModeState(exec, sessionId) {
+    const teams = optionalService('agentTeams')
+    const live = typeof ctx.agents.get === 'function' ? ctx.agents.get(sessionId) : undefined
+    if (teams !== undefined && live !== undefined && typeof teams.isEnabled === 'function') {
+      try {
+        return { enabled: teams.isEnabled(live) === true, source: 'live', tasks: null }
+      } catch {
+        /* fall through to the persisted projection */
+      }
+    }
+    const values = await readProjectionValues(exec, sessionId)
+    const view = values?.agentTeam
+    if (view !== undefined && view !== null && typeof view.enabled === 'boolean') {
+      return { enabled: view.enabled === true, source: 'projection', tasks: Array.isArray(view.tasks) ? view.tasks.length : 0 }
+    }
+    const snapshot = await readSessionSnapshot(exec, sessionId)
+    return { enabled: foldTeamMode(snapshot, sessionId), source: 'log', tasks: null }
+  }
+
+  /** Run `fn` over `items` with a small concurrency limit. */
+  async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length)
+    let index = 0
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (index < items.length) {
+        const current = index
+        index += 1
+        results[current] = await fn(items[current], current)
+      }
+    })
+    await Promise.all(workers)
+    return results
   }
 
   /** Compare-and-set ref for one mutation, rejecting an obviously stale caller. */
@@ -642,6 +730,7 @@ export function apply(ctx, config = {}) {
           limit: { type: 'integer', description: 'Maximum rows to return, 1 through 200. Defaults to 50.' },
           cursor: { type: 'string', description: 'Opaque nextCursor from a previous call. When present, offset is ignored.' },
           offset: { type: 'integer', description: 'Zero-based result offset. Defaults to 0. Ignored when cursor is present.' },
+          include_team: { type: 'boolean', description: "Read each returned session's Agent Teams mode (teamMode) and task count. Adds one extra cold read per returned row; defaults to false." },
         },
       },
       output: TEXT_OUTPUT,
@@ -679,6 +768,18 @@ export function apply(ctx, config = {}) {
           filtered = filtered.slice(offset)
         }
         const page = filtered.slice(0, limit)
+        if (args.include_team === true) {
+          await mapLimit(page, 6, async (row) => {
+            try {
+              const state = await readTeamModeState(exec, row.sessionId)
+              row.teamMode = state.enabled
+              row.teamModeSource = state.source
+              if (state.tasks !== null) row.teamTasks = state.tasks
+            } catch {
+              row.teamMode = null
+            }
+          })
+        }
         if (queryTitles === undefined) {
           const titles = await fetchTitles(page.map((row) => row.sessionId), exec.signal)
           for (const row of page) row.title = titles.get(row.sessionId) ?? null
@@ -1158,6 +1259,77 @@ export function apply(ctx, config = {}) {
           throw new Error(`cannot stop the goal of session "${target}": ${describeAgentError(error)}`)
         }
         return JSON.stringify({ action: 'paused', sessionId: target, goal: goalView(paused) })
+      },
+    }))
+
+    disposers.push(ctx.tools.register({
+      name: 'mesh_get_team_mode',
+      description:
+        "Read the per-session Agent Teams mode (the session's \"use agent team\" switch) of any session. Team mode applies to the session's whole subagent tree and persists; it does not wake the target because DSH stores the selection in the session log. Returns { enabled, source, tasks }.",
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['target'],
+        properties: {
+          target: { type: 'string', description: 'Exact session id from mesh_list_sessions.' },
+        },
+      },
+      output: TEXT_OUTPUT,
+      async execute(args, exec) {
+        callerAgent(exec, 'mesh_get_team_mode')
+        const target = requiredString(args.target, 'target', 200)
+        const state = await readTeamModeState(exec, target)
+        return JSON.stringify({ sessionId: target, enabled: state.enabled, source: state.source, tasks: state.tasks })
+      },
+    }))
+
+    disposers.push(ctx.tools.register({
+      name: 'mesh_set_team_mode',
+      description:
+        "Switch the per-session Agent Teams mode on or off for another session. The selection applies to the target session's whole subagent tree: it adds or removes the Team task tools and prompt guidance, keeps running children and existing tasks, and persists across restarts. The target must be a root session, not a subagent; a cold target is resumed. Use mesh_get_team_mode first when you need the previous value.",
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['target', 'enabled'],
+        properties: {
+          target: { type: 'string', description: 'Exact session id from mesh_list_sessions. Must be a root session.' },
+          enabled: { type: 'boolean', description: 'true enables Agent Teams for the target tree, false disables it.' },
+        },
+      },
+      output: TEXT_OUTPUT,
+      async execute(args, exec) {
+        if (!settings.allowTeam) throw new Error('team mode management is disabled by the session-mesh configuration')
+        callerAgent(exec, 'mesh_set_team_mode')
+        const target = requiredString(args.target, 'target', 200)
+        if (typeof args.enabled !== 'boolean') throw new Error('enabled must be a boolean')
+        const teams = optionalService('agentTeams')
+        if (teams === undefined || typeof teams.setEnabled !== 'function') {
+          throw new Error('the agent-team service is not available in this profile (dsh-agent-team is not mounted)')
+        }
+        const before = await readTeamModeState(exec, target)
+        const targetAgent = await resolveTargetAgent(exec, target)
+        if (targetAgent.session?.header?.origin === 'subagent') {
+          throw new Error(`session "${target}" is a subagent; Team mode is selected on its root session`)
+        }
+        try {
+          await teams.setEnabled(targetAgent, args.enabled, exec.signal)
+        } catch (error) {
+          throw new Error(
+            `cannot ${args.enabled ? 'enable' : 'disable'} Team mode for session "${target}": ${describeAgentError(error)}`,
+          )
+        }
+        let actual = args.enabled
+        try {
+          if (typeof teams.isEnabled === 'function') actual = teams.isEnabled(targetAgent) === true
+        } catch {
+          /* trust the requested value when the live projection is unavailable */
+        }
+        return JSON.stringify({
+          sessionId: target,
+          enabled: actual,
+          previous: before.enabled,
+          changed: actual !== before.enabled,
+        })
       },
     }))
 
