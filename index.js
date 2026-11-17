@@ -32,7 +32,7 @@ export const inject = [
 const MESH_TAG = '[mesh]'
 
 /** Compact collaboration guidance injected for every root session. */
-const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_get_team_mode reads and mesh_set_team_mode switches the per-session Agent Teams mode — the "use agent team" switch that adds Team task tools and guidance to a root session's whole subagent tree; Team mode persists, reads do not wake the target, and mesh_list_sessions can include each session's mode with include_team. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
+const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_get_team_mode reads and mesh_set_team_mode switches the per-session Agent Teams mode — the "use agent team" switch that adds Team task tools and guidance to a root session's whole subagent tree; Team mode persists, reads do not wake the target, and mesh_list_sessions can include each session's mode with include_team. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. mesh_list_models lists the available provider/models; mesh_create_session and mesh_set_model accept provider/model/reasoning_effort and inherit the calling session's model when model is omitted, so a new or retargeted session keeps the same model by default; mesh_set_model also changes a running session's model for its next step. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
 
 /** Detailed collaboration guidance for deployments that opt into it. */
 const POLICY_FULL = `${POLICY_SHORT}
@@ -180,6 +180,7 @@ export function apply(ctx, config = {}) {
     allowCancel: config.allowCancel !== false,
     allowGoal: config.allowGoal !== false,
     allowTeam: config.allowTeam !== false,
+    allowModel: config.allowModel !== false,
     allowArchivedSend: config.allowArchivedSend === true,
     // Immediate delivery ("now" = steer) is available by default; the legacy
     // allowSteer:false explicit opt-out is still honored for old deployments.
@@ -707,6 +708,108 @@ export function apply(ctx, config = {}) {
     return { total: filtered.length, entries: page }
   }
 
+  // ---------------------------------------------------------------------
+  // Model selection: read the calling agent's durable selection, inherit it
+  // for a new session, and retarget any session mid-run. Selection applies to
+  // the session only; the deployment default stays owned by the UI selector.
+  // ---------------------------------------------------------------------
+  function currentSelection(agent) {
+    try {
+      const current = agent?.model?.current?.()
+      return current === undefined || current === null ? undefined : { ...current }
+    } catch {
+      return undefined
+    }
+  }
+
+  function selectionLabel(selection) {
+    return `${selection.provider}/${selection.model}`
+  }
+
+  async function loadModelCatalog() {
+    if (typeof ctx.sessionController.modelCatalog !== 'function') {
+      throw new Error('model selection is unavailable: this DSH build exposes no sessionController.modelCatalog()')
+    }
+    const catalog = await ctx.sessionController.modelCatalog()
+    if (catalog === null || typeof catalog !== 'object' || !Array.isArray(catalog.groups)) {
+      throw new Error('the model catalog returned an unexpected shape')
+    }
+    return catalog
+  }
+
+  function trimString(value) {
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
+  }
+
+  /**
+   * Validate one requested selection against the live model catalog.
+   * An omitted model inherits the caller's model for create/inherit modes.
+   */
+  async function resolveModelSelection(request, callerSelection, options) {
+    const modelId = trimString(request.model)
+    const providerId = trimString(request.provider)
+    const effortId = trimString(request.reasoning_effort ?? request.reasoningEffort)
+    if (modelId === undefined) {
+      if (providerId !== undefined || effortId !== undefined) {
+        throw new Error('provider and reasoning_effort require model')
+      }
+      if (options.inheritFromCaller === true || options.mode === 'create') {
+        if (callerSelection !== undefined) return { selection: { ...callerSelection }, source: 'caller' }
+        const catalog = await loadModelCatalog()
+        if (catalog.default === undefined) {
+          throw new Error('no model is available: the deployment default is unresolved and the calling session has no recorded model')
+        }
+        return { selection: { ...catalog.default }, source: 'deployment-default' }
+      }
+      throw new Error("model is required (omit it only with inherit_from_caller to copy the calling session's model)")
+    }
+    const catalog = await loadModelCatalog()
+    const groups = catalog.groups
+    let group
+    if (providerId !== undefined) {
+      group = groups.find((candidate) => candidate.id === providerId)
+      if (group === undefined) {
+        throw new Error(`provider "${providerId}" has no available models; available: ${groups.map((candidate) => candidate.id).join(', ') || '(none)'}`)
+      }
+    } else {
+      const matches = groups.filter((candidate) => candidate.models.some((model) => model.id === modelId))
+      if (matches.length === 0) throw new Error(`model "${modelId}" is not available; call mesh_list_models for the catalog`)
+      if (matches.length > 1) {
+        throw new Error(`model "${modelId}" exists under multiple providers (${matches.map((candidate) => candidate.id).join(', ')}); pass provider explicitly`)
+      }
+      group = matches[0]
+    }
+    const model = group.models.find((candidate) => candidate.id === modelId)
+    if (model === undefined) {
+      throw new Error(`model "${modelId}" is not available under provider "${group.id}"; available: ${group.models.map((candidate) => candidate.id).join(', ') || '(none)'}`)
+    }
+    let reasoningEffort
+    if (effortId !== undefined) {
+      const efforts = model.reasoning?.efforts ?? []
+      const effort = efforts.find((candidate) => candidate.id === effortId)
+      if (effort === undefined) {
+        throw new Error(`reasoning_effort "${effortId}" is not available for ${group.id}/${modelId}; available: ${efforts.map((candidate) => candidate.id).join(', ') || '(none)'}`)
+      }
+      reasoningEffort = effort.id
+    }
+    const selection = {
+      provider: group.id,
+      model: model.id,
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
+    }
+    const llm = optionalService('llm')
+    if (llm !== undefined && typeof llm.resolveCallConfig === 'function') await llm.resolveCallConfig(selection)
+    return { selection, source: 'explicit' }
+  }
+
+  /** Record one durable session-local model selection. */
+  function selectAgentModel(agent, selection) {
+    if (agent?.model === undefined || typeof agent.model.select !== 'function') {
+      throw new Error('the target agent exposes no model selector (dsh-agent model selection is not mounted)')
+    }
+    agent.model.select(selection)
+  }
+
   /** Register all mesh tools in one effect. */
   ctx.effect(() => {
     const disposers = []
@@ -714,7 +817,7 @@ export function apply(ctx, config = {}) {
     disposers.push(ctx.tools.register({
       name: 'mesh_list_sessions',
       description:
-        'List sessions across all workspaces with title, workspace, working directory, running and archived state. Use it to discover peers before messaging, or to audit the mesh. Prefer the cursor for stable paging on a changing list.',
+        'List sessions across all workspaces with title, workspace, working directory, running and archived state; live rows also report their session-local model selection (provider/model/reasoningEffort) while cold rows report null. Use it to discover peers before messaging, or to audit the mesh. Prefer the cursor for stable paging on a changing list.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -783,6 +886,18 @@ export function apply(ctx, config = {}) {
         if (queryTitles === undefined) {
           const titles = await fetchTitles(page.map((row) => row.sessionId), exec.signal)
           for (const row of page) row.title = titles.get(row.sessionId) ?? null
+        }
+        // Live rows expose their session-local selection; cold rows stay null
+        // because reading one must not wake the session.
+        for (const row of page) {
+          if (row.agentAvailable === false) continue
+          try {
+            const live = ctx.agents.get(row.sessionId)
+            const current = currentSelection(live)
+            row.model = current === undefined ? null : current
+          } catch {
+            row.model = null
+          }
         }
         const nextCursor = filtered.length > page.length && page.length > 0
           ? encodeCursor(page[page.length - 1])
@@ -865,7 +980,7 @@ export function apply(ctx, config = {}) {
     disposers.push(ctx.tools.register({
       name: 'mesh_create_session',
       description:
-        'Create a new root session, optionally in a named workspace, with a title and an initial prompt. Use it to start a parallel task in a fresh conversation that participates in the same mesh.',
+        'Create a new root session, optionally in a named workspace, with a title, an initial prompt, an Agent preset, and a model. The new session inherits the calling session\'s model unless provider/model is given; use mesh_list_models to discover available models. Use it to start a parallel task in a fresh conversation that participates in the same mesh.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -874,12 +989,21 @@ export function apply(ctx, config = {}) {
           title: { type: 'string', description: 'Title to give the new session immediately after creation.' },
           workspace: { type: 'string', description: 'Workspace id, directory path, or title match. Defaults to the calling session workspace, then its working directory.' },
           agent_preset: { type: 'string', description: 'Optional agent preset id for the new session.' },
+          provider: { type: 'string', description: 'Provider id for the new session model; requires model. Omit provider and model to inherit the calling session model.' },
+          model: { type: 'string', description: 'Model id for the new session (see mesh_list_models). Omit to inherit the calling session model.' },
+          reasoning_effort: { type: 'string', description: 'Reasoning effort id for the chosen model; only valid together with model.' },
         },
       },
       output: TEXT_OUTPUT,
       async execute(args, exec) {
         if (!settings.allowCreate) throw new Error('mesh_create_session is disabled by the session-mesh configuration')
+        if (!settings.allowModel && (args.model !== undefined || args.provider !== undefined || args.reasoning_effort !== undefined)) {
+          throw new Error('model selection is disabled by the session-mesh configuration')
+        }
         const agent = callerAgent(exec, 'mesh_create_session')
+        const requestedModel = settings.allowModel
+          ? await resolveModelSelection(args, currentSelection(agent), { mode: 'create' })
+          : undefined
         const request = {}
         let workspaceId = null
         if (typeof args.workspace === 'string' && args.workspace.trim().length > 0) {
@@ -905,6 +1029,20 @@ export function apply(ctx, config = {}) {
         const sessionId = created?.sessionId
         if (typeof sessionId !== 'string' || sessionId.length === 0) throw new Error('session creation returned no session id')
         const warnings = []
+        let model = null
+        let modelSource = null
+        if (requestedModel !== undefined) {
+          try {
+            const resolved = await ctx.sessionController.resolveAgent(sessionId)
+            if (resolved?.error !== undefined) throw resolved.error
+            if (resolved?.agent === undefined) throw new Error('the new session agent is unavailable')
+            selectAgentModel(resolved.agent, requestedModel.selection)
+            model = { ...requestedModel.selection }
+            modelSource = requestedModel.source
+          } catch (error) {
+            warnings.push(`model was not applied: ${describeAgentError(error)}`)
+          }
+        }
         let title = null
         if (typeof args.title === 'string' && args.title.trim().length > 0) {
           try {
@@ -929,10 +1067,78 @@ export function apply(ctx, config = {}) {
           created: true,
           sessionId,
           title,
+          model,
+          modelSource,
           workspaceId,
           promptQueued,
           ...warnings.length > 0 ? { warnings } : {},
           note: promptQueued ? 'The new session started with the given prompt.' : 'The new session is empty until prompted.',
+        })
+      },
+    }))
+
+    disposers.push(ctx.tools.register({
+      name: 'mesh_list_models',
+      description:
+        'List the models this deployment can route, grouped by provider with their reasoning efforts, plus the deployment default and the calling session\'s current selection. Use it before mesh_create_session or mesh_set_model to choose an available model.',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+      output: TEXT_OUTPUT,
+      async execute(_args, exec) {
+        const agent = callerAgent(exec, 'mesh_list_models')
+        const catalog = await loadModelCatalog()
+        return JSON.stringify({
+          default: catalog.default ?? null,
+          current: currentSelection(agent) ?? null,
+          groups: catalog.groups,
+          ...Array.isArray(catalog.failures) && catalog.failures.length > 0 ? { failures: catalog.failures } : {},
+          note: 'Omit provider/model when creating a session, or pass inherit_from_caller to mesh_set_model, to copy the calling session\'s model.',
+        })
+      },
+    }))
+
+    disposers.push(ctx.tools.register({
+      name: 'mesh_set_model',
+      description:
+        'Change one session\'s model mid-conversation; a running turn switches at its next step boundary. The selection is session-local and does not change the deployment default. Pass model (and optional provider/reasoning_effort), or set inherit_from_caller to copy the calling session\'s model.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['target'],
+        properties: {
+          target: { type: 'string', description: 'Exact target session id from mesh_list_sessions.' },
+          provider: { type: 'string', description: 'Provider id; requires model. Omit to resolve a unique model id across providers.' },
+          model: { type: 'string', description: 'Model id (see mesh_list_models). Required unless inherit_from_caller is true.' },
+          reasoning_effort: { type: 'string', description: 'Reasoning effort id for the chosen model; only valid together with model.' },
+          inherit_from_caller: { type: 'boolean', description: 'Copy the calling session\'s current model selection to the target. Defaults to false.' },
+        },
+      },
+      output: TEXT_OUTPUT,
+      async execute(args, exec) {
+        if (!settings.allowModel) throw new Error('model selection is disabled by the session-mesh configuration')
+        const caller = callerAgent(exec, 'mesh_set_model')
+        const targetSessionId = requiredString(args.target, 'target', 200)
+        if (targetSessionId === caller.id) throw new Error('mesh_set_model cannot target the calling session itself; use the native model selector')
+        const inheritFromCaller = args.inherit_from_caller === true
+        if (typeof args.model !== 'string' && !inheritFromCaller) {
+          throw new Error('model is required unless inherit_from_caller is true')
+        }
+        const resolvedSelection = await resolveModelSelection(args, currentSelection(caller), {
+          mode: 'set',
+          inheritFromCaller,
+        })
+        const resolved = await ctx.sessionController.resolveAgent(targetSessionId)
+        if (resolved?.error !== undefined) {
+          throw new Error(`cannot resolve target session "${targetSessionId}": ${describeAgentError(resolved.error)}`)
+        }
+        if (resolved?.agent === undefined) throw new Error(`cannot resolve target session "${targetSessionId}"`)
+        const previous = currentSelection(resolved.agent) ?? null
+        selectAgentModel(resolved.agent, resolvedSelection.selection)
+        return JSON.stringify({
+          sessionId: targetSessionId,
+          previous,
+          selected: { ...resolvedSelection.selection },
+          source: resolvedSelection.source,
+          note: 'The selection is recorded in the target session log and applies from its next step; the deployment default is unchanged.',
         })
       },
     }))

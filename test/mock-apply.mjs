@@ -15,6 +15,28 @@ const WS_OTHER = { id: 'ws-other', title: 'other', path: 'C:\\Users\\tester\\wor
 WS_TEST.sessionIds = ['session-a', 'session-c', 'session-new']
 WS_OTHER.sessionIds = ['session-b']
 
+/** Live model catalog served by the mock session controller. */
+const MODEL_CATALOG = {
+  default: { provider: 'prov-a', model: 'model-a' },
+  routableProviders: ['prov-a', 'prov-b'],
+  groups: [
+    {
+      id: 'prov-a',
+      name: 'Provider A',
+      models: [
+        {
+          id: 'model-a',
+          name: 'Model A',
+          reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], defaultEffort: 'low' },
+        },
+        { id: 'model-b', name: 'Model B' },
+      ],
+    },
+    { id: 'prov-b', name: 'Provider B', models: [{ id: 'model-c', name: 'Model C' }] },
+  ],
+  failures: [],
+}
+
 function createHarness(overrides = {}) {
   const state = {
     archived: ['session-c'],
@@ -41,9 +63,17 @@ function createHarness(overrides = {}) {
   let eventSeq = 0
   let goalCounter = 0
   const liveAgents = new Map()
+  const selectedModels = new Map()
+  let callerSelection = { provider: 'prov-a', model: 'model-a' }
   const agent = {
     id: 'session-a',
     session: { header: { cwd: WS_TEST.path } },
+    model: {
+      current: () => ({ ...callerSelection }),
+      select(next) {
+        callerSelection = { ...next }
+      },
+    },
     ctx: {
       systemPrompt: {
         context(definition) {
@@ -175,6 +205,17 @@ function createHarness(overrides = {}) {
     get(name) {
       if (name === 'goals') return goalService
       if (name === 'agentTeams') return teamService
+      if (name === 'llm') {
+        return {
+          async resolveCallConfig(selection) {
+            const group = MODEL_CATALOG.groups.find((candidate) => candidate.id === selection.provider)
+            if (group === undefined || !group.models.some((model) => model.id === selection.model)) {
+              throw new Error(`model ${selection.provider}/${selection.model} is not routable`)
+            }
+            return selection
+          },
+        }
+      }
       return undefined
     },
     effect(run) {
@@ -235,6 +276,12 @@ function createHarness(overrides = {}) {
           steer(message) {
             delivered.push({ sessionId, kind: 'steer', message })
           },
+          model: {
+            current: () => selectedModels.get(sessionId) ?? { ...MODEL_CATALOG.default },
+            select(next) {
+              selectedModels.set(sessionId, { ...next })
+            },
+          },
         }
         liveAgents.set(sessionId, target)
         return { agent: target }
@@ -245,6 +292,9 @@ function createHarness(overrides = {}) {
       },
       async prompt(request) {
         promptCalls.push(request)
+      },
+      async modelCatalog() {
+        return structuredClone(MODEL_CATALOG)
       },
       async rename(request) {
         if (state.renameError !== null) throw state.renameError
@@ -318,6 +368,8 @@ function createHarness(overrides = {}) {
     teamEnabled,
     teamSetCalls,
     liveAgents,
+    selectedModels,
+    callerSelection: () => callerSelection,
     state,
     agent,
     emit(event, ...args) {
@@ -351,7 +403,7 @@ async function main() {
     failOnWarnings: false,
   })
 
-  await check('registers 16 tools', () => assert.equal(harness.tools.size, 16))
+  await check('registers 18 tools', () => assert.equal(harness.tools.size, 18))
   await check('registers policy section', () => assert.equal(harness.sections.length, 1))
   await check('registers identity context', () => assert.equal(harness.contexts.length, 1))
   await check('identity text renders', () => {
@@ -364,6 +416,8 @@ async function main() {
   const listTool = harness.tools.get('mesh_list_sessions')
   const sendTool = harness.tools.get('mesh_send_message')
   const createTool = harness.tools.get('mesh_create_session')
+  const listModelsTool = harness.tools.get('mesh_list_models')
+  const setModelTool = harness.tools.get('mesh_set_model')
   const renameTool = harness.tools.get('mesh_rename_session')
   const archiveTool = harness.tools.get('mesh_archive_session')
   const cancelTool = harness.tools.get('mesh_cancel_session')
@@ -491,6 +545,88 @@ async function main() {
     assert.equal(result.title, null)
     assert.ok(Array.isArray(result.warnings) && result.warnings.length === 1)
     harness.state.renameError = null
+  })
+
+  await check('list_models returns catalog and caller selection', async () => {
+    const catalog = JSON.parse(await listModelsTool.execute({}, exec()))
+    assert.equal(catalog.default.provider, 'prov-a')
+    assert.equal(catalog.current.provider, 'prov-a')
+    assert.equal(catalog.groups.length, 2)
+    assert.equal(catalog.groups[0].models[0].reasoning.efforts.length, 2)
+  })
+
+  await check('create inherits the caller model by default', async () => {
+    harness.selectedModels.clear()
+    const result = JSON.parse(await createTool.execute({ title: 'inherit-model' }, exec()))
+    assert.equal(result.modelSource, 'caller')
+    assert.deepEqual(result.model, { provider: 'prov-a', model: 'model-a' })
+    assert.deepEqual(harness.selectedModels.get('session-new'), { provider: 'prov-a', model: 'model-a' })
+  })
+
+  await check('create applies an explicit model with reasoning effort', async () => {
+    harness.selectedModels.clear()
+    const result = JSON.parse(await createTool.execute({ provider: 'prov-a', model: 'model-a', reasoning_effort: 'high' }, exec()))
+    assert.equal(result.modelSource, 'explicit')
+    assert.deepEqual(result.model, { provider: 'prov-a', model: 'model-a', reasoningEffort: 'high' })
+    assert.deepEqual(harness.selectedModels.get('session-new'), result.model)
+  })
+
+  await check('create resolves a unique model without provider', async () => {
+    const result = JSON.parse(await createTool.execute({ model: 'model-c' }, exec()))
+    assert.deepEqual(result.model, { provider: 'prov-b', model: 'model-c' })
+  })
+
+  await check('create rejects an unknown model and effort', async () => {
+    await assert.rejects(createTool.execute({ model: 'nope' }, exec()), /is not available/)
+    await assert.rejects(
+      createTool.execute({ provider: 'prov-a', model: 'model-a', reasoning_effort: 'ultra' }, exec()),
+      /reasoning_effort/,
+    )
+    await assert.rejects(createTool.execute({ provider: 'prov-a' }, exec()), /require model/)
+  })
+
+  await check('set_model changes a session model mid-conversation', async () => {
+    harness.selectedModels.clear()
+    const result = JSON.parse(await setModelTool.execute({ target: 'session-b', provider: 'prov-b', model: 'model-c' }, exec()))
+    assert.equal(result.sessionId, 'session-b')
+    assert.equal(result.source, 'explicit')
+    assert.deepEqual(result.selected, { provider: 'prov-b', model: 'model-c' })
+    assert.deepEqual(harness.selectedModels.get('session-b'), { provider: 'prov-b', model: 'model-c' })
+  })
+
+  await check('set_model can inherit the caller model', async () => {
+    harness.selectedModels.clear()
+    const result = JSON.parse(await setModelTool.execute({ target: 'session-b', inherit_from_caller: true }, exec()))
+    assert.equal(result.source, 'caller')
+    assert.deepEqual(result.selected, harness.callerSelection())
+  })
+
+  await check('set_model rejects self, missing model and unknown target model', async () => {
+    await assert.rejects(
+      setModelTool.execute({ target: 'session-a', model: 'model-c' }, exec()),
+      /cannot target the calling session itself/,
+    )
+    await assert.rejects(setModelTool.execute({ target: 'session-b' }, exec()), /model is required/)
+    await assert.rejects(setModelTool.execute({ target: 'session-b', model: 'nope' }, exec()), /is not available/)
+  })
+
+  await check('list_sessions reports the live model selection', async () => {
+    const page = JSON.parse(await listTool.execute({ limit: 5 }, exec()))
+    const row = page.sessions.find((session) => session.sessionId === 'session-a')
+    assert.deepEqual(row.model, { provider: 'prov-a', model: 'model-a' })
+  })
+
+  await check('model selection can be disabled by configuration', async () => {
+    const disabled = createHarness()
+    apply(disabled.ctx, { allowModel: false })
+    await assert.rejects(
+      disabled.tools.get('mesh_create_session').execute({ model: 'model-a' }, execFor(disabled)),
+      /model selection is disabled/,
+    )
+    await assert.rejects(
+      disabled.tools.get('mesh_set_model').execute({ target: 'session-b', model: 'model-a' }, execFor(disabled)),
+      /model selection is disabled/,
+    )
   })
 
   await check('rename works', async () => {

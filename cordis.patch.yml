@@ -12,6 +12,7 @@
         allowCancel: true
         allowGoal: true             # CRUD on other sessions' long-term goals
         allowTeam: true             # read/switch other sessions' per-session Agent Teams mode
+        allowModel: true            # list models, choose one when creating a session, switch a session's model mid-run
         allowImmediate: true        # allow mode=now (steer) delivery; legacy allowSteer:false is honored
         maxSendsPerMinute: 30
         allowArchivedSend: false
