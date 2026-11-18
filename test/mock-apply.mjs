@@ -60,6 +60,39 @@ function createHarness(overrides = {}) {
   const transcriptEvents = new Map()
   const teamEnabled = new Map()
   const teamSetCalls = []
+  const permissionCurrent = new Map([['session-a', 'workspace-write']])
+  const permissionCalls = []
+  const sandboxOverrides = new Map()
+  const permissionSpecs = {
+    'read-only': { sandbox: 'read-only', approval: 'ask', name: '仅可查看' },
+    'workspace-write': { sandbox: 'workspace-write', approval: 'ask', name: '工作区内修改' },
+    'danger-full-access': { sandbox: 'danger-full-access', approval: 'never', name: '完全权限' },
+    auto: { sandbox: 'danger-full-access', approval: 'ask', name: '自动审查EXP' },
+  }
+  const permissionService = {
+    catalog() {
+      return {
+        options: Object.entries(permissionSpecs).map(([value, spec]) => ({ value, name: spec.name })),
+        defaultOptions: Object.entries(permissionSpecs).map(([value, spec]) => ({ value, name: spec.name })),
+        defaultPreset: 'workspace-write',
+      }
+    },
+    current(session) {
+      return permissionCurrent.get(session?.header?.sessionId) ?? 'workspace-write'
+    },
+    resolve(name) {
+      const spec = permissionSpecs[name]
+      if (spec === undefined) throw new Error(`permission: unknown preset "${name}"`)
+      return spec
+    },
+    set(session, name) {
+      this.resolve(name)
+      const sessionId = session?.header?.sessionId
+      permissionCalls.push({ sessionId, name })
+      permissionCurrent.set(sessionId, name)
+      sandboxOverrides.set(sessionId, permissionSpecs[name].sandbox)
+    },
+  }
   let eventSeq = 0
   let goalCounter = 0
   const liveAgents = new Map()
@@ -67,7 +100,7 @@ function createHarness(overrides = {}) {
   let callerSelection = { provider: 'prov-a', model: 'model-a' }
   const agent = {
     id: 'session-a',
-    session: { header: { cwd: WS_TEST.path } },
+    session: { header: { sessionId: 'session-a', cwd: WS_TEST.path } },
     model: {
       current: () => ({ ...callerSelection }),
       select(next) {
@@ -205,6 +238,31 @@ function createHarness(overrides = {}) {
     get(name) {
       if (name === 'goals') return goalService
       if (name === 'agentTeams') return teamService
+      if (name === 'permissionPresets') return permissionService
+      if (name === 'sandboxPolicy') {
+        return {
+          defaultMode: 'workspace-write',
+          overrideOf(session) {
+            return sandboxOverrides.get(session?.header?.sessionId)
+          },
+        }
+      }
+      if (name === 'approval') {
+        return {
+          config: { policy: 'ask' },
+          overrideOf() {
+            return undefined
+          },
+        }
+      }
+      if (name === 'sessions') {
+        return {
+          get(id) {
+            return liveAgents.get(id)?.session
+          },
+          async flush() {},
+        }
+      }
       if (name === 'llm') {
         return {
           async resolveCallConfig(selection) {
@@ -288,6 +346,20 @@ function createHarness(overrides = {}) {
       },
       async create(request) {
         createRequests.push(request)
+        if (!liveAgents.has('session-new')) {
+          liveAgents.set('session-new', {
+            id: 'session-new',
+            session: { header: { sessionId: 'session-new', cwd: request?.cwd ?? WS_TEST.path } },
+            followup() {},
+            steer() {},
+            model: {
+              current: () => selectedModels.get('session-new') ?? { ...MODEL_CATALOG.default },
+              select(next) {
+                selectedModels.set('session-new', { ...next })
+              },
+            },
+          })
+        }
         return { sessionId: 'session-new' }
       },
       async prompt(request) {
@@ -367,6 +439,10 @@ function createHarness(overrides = {}) {
     teamService,
     teamEnabled,
     teamSetCalls,
+    permissionService,
+    permissionCurrent,
+    permissionCalls,
+    sandboxOverrides,
     liveAgents,
     selectedModels,
     callerSelection: () => callerSelection,
@@ -403,7 +479,7 @@ async function main() {
     failOnWarnings: false,
   })
 
-  await check('registers 18 tools', () => assert.equal(harness.tools.size, 18))
+  await check('registers 19 tools', () => assert.equal(harness.tools.size, 19))
   await check('registers policy section', () => assert.equal(harness.sections.length, 1))
   await check('registers identity context', () => assert.equal(harness.contexts.length, 1))
   await check('identity text renders', () => {
@@ -545,6 +621,55 @@ async function main() {
     assert.equal(result.title, null)
     assert.ok(Array.isArray(result.warnings) && result.warnings.length === 1)
     harness.state.renameError = null
+  })
+
+  await check('create inherits the caller permission preset', async () => {
+    harness.permissionCurrent.set('session-a', 'workspace-write')
+    const result = JSON.parse(await createTool.execute({ title: 'perm-inherit' }, exec()))
+    assert.equal(result.permission.preset, 'workspace-write')
+    assert.equal(result.permission.inherited, true)
+    assert.equal(harness.permissionCalls.at(-1).sessionId, 'session-new')
+  })
+
+  await check('create applies an explicit permission preset', async () => {
+    const result = JSON.parse(await createTool.execute({ permission: 'read-only' }, exec()))
+    assert.equal(result.permission.preset, 'read-only')
+    assert.equal(result.permission.inherited, false)
+    assert.equal(result.permission.label, '仅可查看')
+  })
+
+  await check('create accepts a Chinese permission label', async () => {
+    harness.permissionCurrent.set('session-a', 'danger-full-access')
+    harness.sandboxOverrides.set('session-a', 'danger-full-access')
+    const result = JSON.parse(await createTool.execute({ permission: '完全权限' }, exec()))
+    assert.equal(result.permission.preset, 'danger-full-access')
+  })
+
+  await check('create inherits full access from a full-access caller', async () => {
+    const result = JSON.parse(await createTool.execute({}, exec()))
+    assert.equal(result.permission.preset, 'danger-full-access')
+    assert.equal(result.permission.inherited, true)
+  })
+
+  await check('create rejects full access from a restricted caller', async () => {
+    harness.permissionCurrent.set('session-a', 'workspace-write')
+    harness.sandboxOverrides.set('session-a', 'workspace-write')
+    await assert.rejects(createTool.execute({ permission: 'danger-full-access' }, exec()), /danger-full-access caller/)
+    await assert.rejects(createTool.execute({ permission: '自动审查EXP' }, exec()), /danger-full-access caller/)
+  })
+
+  await check('create inherits a preset matching a custom caller', async () => {
+    harness.permissionCurrent.set('session-a', 'custom')
+    harness.sandboxOverrides.set('session-a', 'workspace-write')
+    const result = JSON.parse(await createTool.execute({}, exec()))
+    assert.equal(result.permission.preset, 'workspace-write')
+  })
+
+  await check('list_permission_presets reports the catalog and caller state', async () => {
+    const result = JSON.parse(await harness.tools.get('mesh_list_permission_presets').execute({}, exec()))
+    assert.equal(result.defaultPreset, 'workspace-write')
+    assert.deepEqual(result.presets.map((option) => option.value), ['read-only', 'workspace-write', 'danger-full-access', 'auto'])
+    assert.equal(result.current, 'custom')
   })
 
   await check('list_models returns catalog and caller selection', async () => {

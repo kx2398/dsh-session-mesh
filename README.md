@@ -7,9 +7,9 @@
 - License: MIT
 - 要求：DSH `>=0.2.1-rc.3 <0.3.0`（`engines.dsh`）；desktop / web-app 这类包含标准 Host 服务的 profile
 - 零运行时依赖、无构建步骤、纯 ESM
-- 18 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
+- 19 个 `mesh_*` 工具 + 两段模型可见提示（policy / identity）
 - 分发方式：GitHub tag / Release tarball（**不发布到 npm**）
-- 兼容性：已在 DSH **0.2.1-rc.3**、**0.2.2-rc.1** 与 **0.2.2-rc.3** 上验证。0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`；0.2.2-rc.3 的 runtime-context 提醒包装按 `source.kind` 过滤，不影响转录。Agent Teams 开关自 DSH 0.2.1-rc.2 起是**会话级**选择（`team/mode`），本插件可跨会话读取与切换（`mesh_get_team_mode` / `mesh_set_team_mode`）。归档清理工作树属于宿主行为（见限制 10）。模型选择自 DSH 0.2.2-rc.3 起通过 `sessionController.modelCatalog()` 与 `agent.model.select()` 提供，本插件据此实现 `mesh_list_models` / `mesh_create_session` 选型 / `mesh_set_model` 中途切换。
+- 兼容性：已在 DSH **0.2.1-rc.3**、**0.2.2-rc.1** 与 **0.2.2-rc.3** 上验证。0.2.2 移除了 `sessionController.inspect`，读会话统一走 `sessionQuery.readSession()`，0.2.1 自动回退 `inspect()`；0.2.2-rc.3 的 runtime-context 提醒包装按 `source.kind` 过滤，不影响转录。Agent Teams 开关自 DSH 0.2.1-rc.2 起是**会话级**选择（`team/mode`），本插件可跨会话读取与切换（`mesh_get_team_mode` / `mesh_set_team_mode`）。归档清理工作树属于宿主行为（见限制 10）。权限预设来自 `dsh-permission-presets`（base profile 默认挂载）；未挂载时创建工具会明确报错。模型选择自 DSH 0.2.2-rc.3 起通过 `sessionController.modelCatalog()` 与 `agent.model.select()` 提供，本插件据此实现 `mesh_list_models` / `mesh_create_session` 选型 / `mesh_set_model` 中途切换。
 
 ---
 
@@ -17,10 +17,10 @@
 
 ```text
 # 从 GitHub 按 tag 安装
-plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.6.0
+plugin_manager install_bundle  target = github:kx2398/dsh-session-mesh#v0.7.0
 
 # 或下载 Release 里的 tgz 后本地安装
-plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.6.0.tgz
+plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.7.0.tgz
 ```
 
 ## 2. 它做什么
@@ -29,8 +29,9 @@ plugin_manager install_bundle  target = file:C:/.../dsh-session-mesh-0.6.0.tgz
 |---|---|
 | `mesh_list_sessions` | 列出**所有工作区**的会话：sessionId、标题、所属工作区（id/title/path）、cwd、running、archived、agent 可用性、是否 subagent、更新时间。支持工作区/运行态/归档/subagent/ID或标题子串过滤 + 游标分页（`nextCursor`）；`include_team: true` 时附带每行 Team 模式（`teamMode` / `teamModeSource` / `teamTasks`）；live 行还返回该会话当前模型（`model`：provider/model/reasoningEffort，冷会话为 null） |
 | `mesh_send_message` | 给**任意会话**发一条自包含消息，**以真实 `agent-message/relay` 消息投递**（source 带 `senderSessionId`，不伪装成人类消息）。按 `mode` 选择投递方式：`now`（**默认**，立即，走 `agent.steer`，在目标下一个 step 边界投递，可插队正在跑的回合）；`queue`（显式排队，走 `agent.followup`，等目标当前回合结束）；空闲/冷目标都会被唤醒；有速率限制与重复抑制 |
-| `mesh_create_session` | 新建根会话：可指定工作区（id/路径/标题）、标题、初始 prompt、agent preset，以及 **model / provider / reasoning_effort**（省略模型时**继承调用方当前模型**，调用方未记录时回退部署默认）；不指定工作区时**默认为调用方所在工作区** |
+| `mesh_create_session` | 新建根会话：可指定工作区（id/路径/标题）、标题、初始 prompt、agent preset，以及 **model / provider / reasoning_effort**（省略模型时**继承调用方当前模型**，调用方未记录时回退部署默认）；`permission` 指定权限预设（`read-only` / `workspace-write` / `danger-full-access` / `auto`，也接受中文标签 仅可查看/工作区内修改/完全权限/自动审查EXP），**省略时继承调用方当前权限**；`danger-full-access` 与 `auto` 只允许由本身具备 danger-full-access 沙箱的调用方指定（不会提权）；不指定工作区时**默认为调用方所在工作区** |
 | `mesh_list_models` | 列出可用 provider/model（含 reasoning efforts）、部署默认模型与调用方当前选择；创建或切换模型前先用它选型 |
+| `mesh_list_permission_presets` | 列出部署的权限预设（沙箱模式 + 审批策略）、部署默认预设，以及调用方当前预设与有效沙箱；创建会话前先用它选型 |
 | `mesh_set_model` | **中途切换**任意会话的模型（下一次 step 生效；会话级选择，不改部署默认）；`inherit_from_caller: true` 复制调用方当前模型 |
 | `mesh_rename_session` | 改任意会话标题（pin 住，不被自动标题覆盖） |
 | `mesh_archive_session` | 归档/取消归档任意会话；运行中的会话默认拒绝并说明有哪些工作，`stop_activity: true` 时先停止再归档 |
@@ -86,6 +87,8 @@ mesh_* 工具
 
 - **Team 模式**：读优先 `ctx.agentTeams.isEnabled(live)`，否则 `sessionController.projections()` 的 `agentTeam` 值（冷读、不唤醒），再否则折叠 `team/mode` 日志；写要求目标是根会话（subagent 继承根的选择），用 `resolveAgent` 后调 `ctx.agentTeams.setEnabled`。
 
+- **权限预设**：`mesh_list_permission_presets` 读 `ctx.permissionPresets.catalog()`（配置预设 + 存活的 Auto）与 `current(session)`；`mesh_create_session` 在 `create` 后、`prompt` 前用 `ctx.permissionPresets.set(session, preset)` 写入 `permission/preset` 并同步沙箱/审批旋钮，再 `ctx.sessions.flush` 持久化。省略 `permission` 时继承调用方 `current()`（调用方为 `custom` 时按有效沙箱+审批匹配一个预设，匹配不到回退部署默认）；请求 danger-full-access（或同为 full 沙箱的 auto）要求调用方有效沙箱已是 danger-full-access，否则报错，绝不提权。
+
 - **模型选择**：`mesh_list_models` 读 `sessionController.modelCatalog()`（provider 分组、reasoning efforts、部署默认）；`mesh_create_session` 在 `create` 之后、`prompt` 之前通过 `resolveAgent(sessionId).model.select()` 落一条 `model/selection` 事件；`mesh_set_model` 同样只写会话级选择。两者都不改部署默认（`agentDefaultModel`），可传 `provider` / `model` / `reasoning_effort`，缺省时继承调用方 `agent.model.current()`。
 
 - **性能**：列表先做不需要标题的过滤 → 排序 → 分页 → 只给当页读标题；带 `query` 时才读候选集标题。工作区映射一次 O(工作区×会话) 建索引，不再每行遍历。
@@ -127,10 +130,10 @@ mesh_* 工具
 ```powershell
 git clone https://github.com/kx2398/dsh-session-mesh.git
 cd dsh-session-mesh
-npm test        # node test/mock-apply.mjs，51 项
+npm test        # node test/mock-apply.mjs，58 项
 ```
 
-覆盖：18 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页/模型字段、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**模型（目录读取与调用方选择、创建继承/显式选型/省略 provider 的唯一解析、非法模型与 effort 拒绝、set_model 中途切换与继承调用方、allowModel 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、**0.2.2-rc.3 runtime-context 提醒包装过滤**、**Team 模式读取（live / projection）与切换（含 subagent 拒绝、allowTeam 开关、include_team）**、`policy: off`。
+覆盖：19 个工具注册、policy/identity 注入（含身份文本渲染）、列表过滤/游标分页/模型字段、agent-message 投递形态、重复抑制、steer 禁用、自消息拒绝、速率限制、归档目标拒绝、创建（含工作区推断/改名 warning）、改名、归档运行中会话的错误格式化、归档/取消归档、取消自拒绝、wait 成功/超时、**目标 CRUD（冷读/创建/编辑/暂停恢复完成/替换已完成目标/revision CAS/清除/allowGoal/服务缺失）**、**now/queue 投递模式（默认 now；含 legacy steer 别名与 allowImmediate 开关）**、**模型（目录读取与调用方选择、创建继承/显式选型/省略 provider 的唯一解析、非法模型与 effort 拒绝、set_model 中途切换与继承调用方、allowModel 开关）**、**目标启停（start/stop 生命周期与幂等）**、**转录（人/assistant/tool/peer 配对、内部消息过滤、include_tools、不唤醒目标）**、**readSession/inspect 双路径回退**、**0.2.2-rc.3 runtime-context 提醒包装过滤**、**Team 模式读取（live / projection）与切换（含 subagent 拒绝、allowTeam 开关、include_team）**、**权限预设（继承 / 显式 / 中文别名 / custom 匹配 / 提权拒绝 / allowModel 无关）**、`policy: off`。
 
 ### 在线验证
 
@@ -143,6 +146,7 @@ npm test        # node test/mock-apply.mjs，51 项
 - 转录：对冷会话 `mesh_read_session` 返回最近若干条 human/assistant/tool/peer 记录，过滤内部注入消息，且不唤醒目标。
 - Team 模式：`mesh_list_sessions(include_team: true)` 返回每行开关；`mesh_get_team_mode` 对 live / 冷会话分别走 live / projection 且不唤醒；`mesh_set_team_mode` 对测试会话 enable → disable 均成功并持久化。
 - 模型：`mesh_list_models` 返回可用 provider/model、部署默认与调用方当前选择；`mesh_create_session` 不传模型时新建会话继承调用方模型（`modelSource: "caller"`），显式传 `provider`/`model`/`reasoning_effort` 时按所选落库；`mesh_set_model` 对运行中/空闲会话均返回 `previous` → `selected`，且部署默认保持不变；`mesh_list_sessions` 的 live 行回显当前模型。
+- 权限：`mesh_list_permission_presets` 返回 read-only / workspace-write / danger-full-access / auto 与调用方当前预设；`mesh_create_session(permission: "read-only")` 落 read-only，省略时继承调用方 danger-full-access，传「工作区内修改」等中文标签也正确解析。
 - 0.2.2-rc.3 实测：list / create / send(默认 now) / wait / rename / archive / unarchive / goal start-stop-start-clear / 冷读转录 / 冷读目标 全部正常；0.2.2-rc.3 的 runtime-context 提醒（`<system-reminder>` + `sections`）不进入转录。
 
 ## 7. 已知限制
@@ -159,6 +163,7 @@ npm test        # node test/mock-apply.mjs，51 项
 10. **归档会清理干净工作树（DSH ≥0.2.2-rc.1）**：宿主归档时会删除它创建的干净 worktree（分支和提交保留），未提交、被忽略或 skip-worktree/assume-unchanged 的改动会丢失；需要保留时先 `git worktree lock <path>`，或开启 worktree 服务的 `retainOnArchive`。本插件只调用 `archiveSession`，清理由宿主完成。
 11. **Team 模式只作用于根会话的子树**：`mesh_set_team_mode` 只能切换根会话，subagent 继承其存活根的开关；切换会唤醒冷会话，但不会停止已运行的子代理、不会删除任务，选择持久化。
 12. **模型选择是会话级**：`mesh_create_session` / `mesh_set_model` 只写目标会话的 `model/selection` 事件，不改部署默认（`agentDefaultModel`）；运行中的回合在下一个 step 边界切换，当前 step 已发出的请求不受影响。`mesh_set_model` 拒绝把调用方自己作为目标。模型目录来自 `sessionController.modelCatalog()`，不可路由的 provider/model 会明确报错并列出候选。
+13. **权限提权受调用方沙箱约束**：`mesh_create_session` 只能在调用方有效沙箱为 danger-full-access 时指定 danger-full-access / auto；其他会话即使显式请求也会被拒绝。权限预设依赖 `dsh-permission-presets`，未挂载时工具会报错。
 
 ## 8. 与生态现有插件的关系
 

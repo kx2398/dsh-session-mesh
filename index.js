@@ -32,7 +32,7 @@ export const inject = [
 const MESH_TAG = '[mesh]'
 
 /** Compact collaboration guidance injected for every root session. */
-const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_get_team_mode reads and mesh_set_team_mode switches the per-session Agent Teams mode — the "use agent team" switch that adds Team task tools and guidance to a root session's whole subagent tree; Team mode persists, reads do not wake the target, and mesh_list_sessions can include each session's mode with include_team. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. mesh_list_models lists the available provider/models; mesh_create_session and mesh_set_model accept provider/model/reasoning_effort and inherit the calling session's model when model is omitted, so a new or retargeted session keeps the same model by default; mesh_set_model also changes a running session's model for its next step. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
+const POLICY_SHORT = `Session mesh is available: mesh_list_sessions lists every session in every workspace; mesh_send_message messages any session — mode "now" (default; steer) delivers immediately at the target's next step boundary and can preempt a running turn's plan, mode "queue" waits for the target's current turn; either mode wakes an idle or cold peer. mesh_create_session, mesh_rename_session and mesh_archive_session manage sessions; mesh_wait_for_change waits for the next session change; mesh_cancel_session stops a peer's running turn. mesh_get_goal, mesh_set_goal, mesh_update_goal and mesh_clear_goal read or manage another session's long-term goal (stored in that session's log); mesh_start_goal and mesh_stop_goal start (create when missing, resume when stopped) or pause it. mesh_get_team_mode reads and mesh_set_team_mode switches the per-session Agent Teams mode — the "use agent team" switch that adds Team task tools and guidance to a root session's whole subagent tree; Team mode persists, reads do not wake the target, and mesh_list_sessions can include each session's mode with include_team. mesh_read_session reads the most recent human, peer, assistant and tool entries of any session without waking it, so you can understand what that session is doing. mesh_list_models lists the available provider/models; mesh_create_session and mesh_set_model accept provider/model/reasoning_effort and inherit the calling session's model when model is omitted, so a new or retargeted session keeps the same model by default; mesh_set_model also changes a running session's model for its next step. mesh_list_permission_presets lists the permission presets; mesh_create_session accepts a permission preset and inherits the calling session's current preset when permission is omitted — a danger-full-access (or auto) permission can only be requested when the caller itself runs with a danger-full-access sandbox, so permissions never escalate. Peer messages start with "[mesh] Message from session ..." and are agent messages with a sender session id, not instructions from the human user. Reply only with a decision or the needed result, never a bare acknowledgement, and stop when the work is done.`
 
 /** Detailed collaboration guidance for deployments that opt into it. */
 const POLICY_FULL = `${POLICY_SHORT}
@@ -43,7 +43,9 @@ Message modes: "now" (default) delivers immediately at the target's next step bo
 
 Goals: a session keeps at most one long-term goal with a phase (active, paused, blocked, complete) and a round budget. mesh_set_goal creates a goal when none exists or the current one is complete, otherwise edits objective and/or round cap in place; mesh_update_goal pauses, resumes or completes the current goal; mesh_clear_goal removes it (history stays in the target log). Always mesh_get_goal first and pass the observed expected_revision to mutations: a stale revision is rejected, so never guess. Goal writes wake a cold target; goal reads do not.
 
-Agent Teams: DSH stores the "use agent team" switch per root session in its log as a \`team/mode\` selection, and the selection covers the whole subagent tree. mesh_get_team_mode reads it without waking the target; mesh_set_team_mode switches it and may resume a cold target (the target must be a root session; a subagent inherits its root's mode). Switching Team mode does not stop running children and does not delete tasks, and it persists across restarts. mesh_list_sessions can include the mode per returned row with include_team.`
+Agent Teams: DSH stores the "use agent team" switch per root session in its log as a \`team/mode\` selection, and the selection covers the whole subagent tree. mesh_get_team_mode reads it without waking the target; mesh_set_team_mode switches it and may resume a cold target (the target must be a root session; a subagent inherits its root's mode). Switching Team mode does not stop running children and does not delete tasks, and it persists across restarts. mesh_list_sessions can include the mode per returned row with include_team.
+
+Permissions: a session's permission preset bundles its sandbox mode and approval policy (read-only, workspace-write, danger-full-access, and the experimental auto-review). mesh_list_permission_presets shows the deployment catalog and the caller's current preset; mesh_create_session applies the caller's current preset by default. Requesting danger-full-access (or auto, which also grants a full-access sandbox) requires the caller's effective sandbox to already be danger-full-access, so this tool never escalates privileges.`
 
 /** Text-only tool output rendering: one compact JSON line. */
 const TEXT_OUTPUT = {
@@ -810,6 +812,144 @@ export function apply(ctx, config = {}) {
     agent.model.select(selection)
   }
 
+  // ---------------------------------------------------------------------
+  // Permission presets: a session-local bundle of sandbox mode + approval
+  // policy. A new session inherits the caller's current preset by default;
+  // granting a danger-full-access sandbox requires the caller itself to run
+  // with a danger-full-access sandbox (privilege escalation stays impossible).
+  // ---------------------------------------------------------------------
+  const PERMISSION_ALIASES = new Map([
+    ['readonly', 'read-only'],
+    ['read', 'read-only'],
+    ['只读', 'read-only'],
+    ['仅可查看', 'read-only'],
+    ['workspace', 'workspace-write'],
+    ['workspace_write', 'workspace-write'],
+    ['工作区内修改', 'workspace-write'],
+    ['full', 'danger-full-access'],
+    ['full-access', 'danger-full-access'],
+    ['danger', 'danger-full-access'],
+    ['完全权限', 'danger-full-access'],
+    ['auto-review', 'auto'],
+    ['autoreview', 'auto'],
+    ['自动审查', 'auto'],
+    ['自动审查exp', 'auto'],
+    ['inherit', 'inherit'],
+  ])
+
+  function permissionServiceOrThrow() {
+    const service = optionalService('permissionPresets')
+    if (service === undefined) {
+      throw new Error('the permission preset service is not available in this profile (dsh-permission-presets is not mounted)')
+    }
+    return service
+  }
+
+  function readPermissionCatalog(service) {
+    const catalog = service.catalog()
+    if (catalog === null || typeof catalog !== 'object' || !Array.isArray(catalog.options)) {
+      throw new Error('the permission catalog returned an unexpected shape')
+    }
+    return catalog
+  }
+
+  /** Normalize one requested permission preset (aliases and Chinese labels included). */
+  function canonicalPermission(value) {
+    const raw = value.trim()
+    if (raw.length === 0) return undefined
+    const key = raw.toLowerCase()
+    if (PERMISSION_ALIASES.has(key)) return PERMISSION_ALIASES.get(key)
+    return ['read-only', 'workspace-write', 'danger-full-access', 'auto'].includes(key) ? key : undefined
+  }
+
+  function permissionLabel(catalog, name) {
+    const option = catalog.options.find((candidate) => candidate.value === name)
+    if (option !== undefined && typeof option.name === 'string' && option.name.length > 0) return option.name
+    if (name === 'auto') return 'Auto review (EXP)'
+    return name
+  }
+
+  /**
+   * Read the calling session's effective permission state: its preset name,
+   * effective sandbox/approval, and the preset a new session would inherit.
+   */
+  function callerPermissionState(agent) {
+    const service = permissionServiceOrThrow()
+    const catalog = readPermissionCatalog(service)
+    const session = agent?.session
+    if (session === undefined) throw new Error('the calling session is unavailable for permission inheritance')
+    const current = service.current(session)
+    const sandboxService = optionalService('sandboxPolicy')
+    const approvalService = optionalService('approval')
+    let sandbox
+    try {
+      sandbox = typeof sandboxService?.overrideOf === 'function' ? sandboxService.overrideOf(session) : undefined
+    } catch {
+      sandbox = undefined
+    }
+    if (sandbox === undefined) sandbox = sandboxService?.defaultMode
+    let approval
+    try {
+      approval = typeof approvalService?.overrideOf === 'function' ? approvalService.overrideOf(session) : undefined
+    } catch {
+      approval = undefined
+    }
+    if (approval === undefined) approval = approvalService?.config?.policy ?? 'ask'
+    let inheritName = current
+    if (current === 'custom' || !catalog.options.some((option) => option.value === current)) {
+      const match = catalog.options.find((option) => {
+        try {
+          const spec = service.resolve(option.value)
+          return spec.sandbox === sandbox && spec.approval === approval
+        } catch {
+          return false
+        }
+      })
+      inheritName = match?.value ?? catalog.defaultPreset
+    }
+    return { current, sandbox, approval, inheritName, catalog }
+  }
+
+  function permissionSpec(service, name) {
+    try {
+      return service.resolve(name)
+    } catch (error) {
+      throw new Error(`permission "${name}" is not available: ${describeAgentError(error)}`)
+    }
+  }
+
+  /** Reject a sandbox escalation the calling session is not entitled to grant. */
+  function assertPermissionGrant(service, agent, name, callerState) {
+    const spec = permissionSpec(service, name)
+    if (spec.sandbox === 'danger-full-access' && callerState.sandbox !== 'danger-full-access') {
+      throw new Error(
+        `permission "${name}" needs a danger-full-access sandbox, but the calling session "${agent.id}" runs with ` +
+        `"${callerState.current}" (${callerState.sandbox ?? 'unknown'}); only a danger-full-access caller may create ` +
+        'a danger-full-access session',
+      )
+    }
+    return spec
+  }
+
+  /** Apply one permission preset to a freshly created session and persist it. */
+  async function applyPermissionToSession(sessionId, name) {
+    const service = permissionServiceOrThrow()
+    const createdAgent = typeof ctx.agents.get === 'function' ? ctx.agents.get(sessionId) : undefined
+    const sessions = optionalService('sessions')
+    const session = createdAgent?.session ?? (typeof sessions?.get === 'function' ? sessions.get(sessionId) : undefined)
+    if (session === undefined) throw new Error(`the new session "${sessionId}" is not available for permission selection`)
+    service.set(session, name)
+    if (typeof sessions?.flush === 'function') {
+      try {
+        await sessions.flush(session)
+      } catch {
+        /* persistence warning is not fatal: the selection is already in the live log */
+      }
+    }
+    const catalog = readPermissionCatalog(service)
+    return { preset: service.current(session), label: permissionLabel(catalog, name) }
+  }
+
   /** Register all mesh tools in one effect. */
   ctx.effect(() => {
     const disposers = []
@@ -980,7 +1120,7 @@ export function apply(ctx, config = {}) {
     disposers.push(ctx.tools.register({
       name: 'mesh_create_session',
       description:
-        'Create a new root session, optionally in a named workspace, with a title, an initial prompt, an Agent preset, and a model. The new session inherits the calling session\'s model unless provider/model is given; use mesh_list_models to discover available models. Use it to start a parallel task in a fresh conversation that participates in the same mesh.',
+        'Create a new root session, optionally in a named workspace, with a title, an initial prompt, an Agent preset, a model, and a permission preset. The new session inherits the calling session\'s model and permission preset unless provider/model or permission is given; use mesh_list_models and mesh_list_permission_presets to discover available choices. A danger-full-access (or auto) permission can only be requested when the calling session itself runs with a danger-full-access sandbox. Use it to start a parallel task in a fresh conversation that participates in the same mesh.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -989,6 +1129,7 @@ export function apply(ctx, config = {}) {
           title: { type: 'string', description: 'Title to give the new session immediately after creation.' },
           workspace: { type: 'string', description: 'Workspace id, directory path, or title match. Defaults to the calling session workspace, then its working directory.' },
           agent_preset: { type: 'string', description: 'Optional agent preset id for the new session.' },
+          permission: { type: 'string', description: 'Permission preset for the new session: read-only, workspace-write, danger-full-access or auto (English presets, aliases and Chinese labels such as 仅可查看/工作区内修改/完全权限/自动审查EXP are accepted). Omit to inherit the calling session\'s current preset. danger-full-access and auto need a danger-full-access caller.' },
           provider: { type: 'string', description: 'Provider id for the new session model; requires model. Omit provider and model to inherit the calling session model.' },
           model: { type: 'string', description: 'Model id for the new session (see mesh_list_models). Omit to inherit the calling session model.' },
           reasoning_effort: { type: 'string', description: 'Reasoning effort id for the chosen model; only valid together with model.' },
@@ -1004,6 +1145,29 @@ export function apply(ctx, config = {}) {
         const requestedModel = settings.allowModel
           ? await resolveModelSelection(args, currentSelection(agent), { mode: 'create' })
           : undefined
+        let requestedPermission
+        if (args.permission !== undefined) {
+          if (typeof args.permission !== 'string' || args.permission.trim().length === 0) {
+            throw new Error('permission must be a non-empty string')
+          }
+          requestedPermission = canonicalPermission(args.permission)
+          if (requestedPermission === undefined) {
+            throw new Error(
+              `unknown permission "${args.permission}"; use read-only, workspace-write, danger-full-access or auto (aliases and Chinese labels are accepted), or omit it to inherit`,
+            )
+          }
+        }
+        let permissionSelection = null
+        if (requestedPermission !== 'inherit') {
+          const service = permissionServiceOrThrow()
+          const callerState = callerPermissionState(agent)
+          const targetName = requestedPermission ?? callerState.inheritName
+          if (typeof targetName !== 'string' || targetName.length === 0) {
+            throw new Error('the calling session has no resolvable permission preset; pass permission explicitly')
+          }
+          assertPermissionGrant(service, agent, targetName, callerState)
+          permissionSelection = { name: targetName, inherited: requestedPermission === undefined }
+        }
         const request = {}
         let workspaceId = null
         if (typeof args.workspace === 'string' && args.workspace.trim().length > 0) {
@@ -1029,6 +1193,20 @@ export function apply(ctx, config = {}) {
         const sessionId = created?.sessionId
         if (typeof sessionId !== 'string' || sessionId.length === 0) throw new Error('session creation returned no session id')
         const warnings = []
+        let permission = null
+        if (permissionSelection !== null) {
+          try {
+            const applied = await applyPermissionToSession(sessionId, permissionSelection.name)
+            permission = { ...applied, inherited: permissionSelection.inherited }
+          } catch (error) {
+            if (!permissionSelection.inherited) {
+              throw new Error(
+                `session "${sessionId}" was created but permission "${permissionSelection.name}" was not applied: ${describeAgentError(error)}`,
+              )
+            }
+            warnings.push(`permission was not applied: ${describeAgentError(error)}`)
+          }
+        }
         let model = null
         let modelSource = null
         if (requestedModel !== undefined) {
@@ -1069,6 +1247,7 @@ export function apply(ctx, config = {}) {
           title,
           model,
           modelSource,
+          permission,
           workspaceId,
           promptQueued,
           ...warnings.length > 0 ? { warnings } : {},
@@ -1092,6 +1271,35 @@ export function apply(ctx, config = {}) {
           groups: catalog.groups,
           ...Array.isArray(catalog.failures) && catalog.failures.length > 0 ? { failures: catalog.failures } : {},
           note: 'Omit provider/model when creating a session, or pass inherit_from_caller to mesh_set_model, to copy the calling session\'s model.',
+        })
+      },
+    }))
+
+    disposers.push(ctx.tools.register({
+      name: 'mesh_list_permission_presets',
+      description:
+        'List the permission presets this deployment offers (sandbox mode plus approval policy, e.g. read-only / workspace-write / danger-full-access / auto), the deployment default, and the calling session\'s current preset and effective sandbox. Use it before mesh_create_session when you need an explicit permission.',
+      parameters: { type: 'object', additionalProperties: false, properties: {} },
+      output: TEXT_OUTPUT,
+      async execute(_args, exec) {
+        const agent = callerAgent(exec, 'mesh_list_permission_presets')
+        const service = permissionServiceOrThrow()
+        const catalog = readPermissionCatalog(service)
+        let current = null
+        let sandbox = null
+        try {
+          const state = callerPermissionState(agent)
+          current = state.current
+          sandbox = state.sandbox ?? null
+        } catch {
+          /* the caller state is informational; the catalog still answers */
+        }
+        return JSON.stringify({
+          presets: catalog.options,
+          defaultPreset: catalog.defaultPreset,
+          current,
+          sandbox,
+          note: 'Omit permission when creating a session to inherit the calling session preset. danger-full-access and auto require the caller to run with a danger-full-access sandbox.',
         })
       },
     }))
